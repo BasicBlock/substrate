@@ -169,7 +169,11 @@ spec:
         # /var/lib/ate hostPath as root. CAP_DAC_OVERRIDE is for one thing:
         # emptying a directory a non-root actor created in its 0777 durable dir.
         # It is owned by the actor's uid, typically 0755, so root has no write
-        # access to it and resetActorDirs fails after every checkpoint.
+        # access to it and resetActorDirs fails after every checkpoint. It also
+        # needs CAP_CHOWN to restore the numeric uid/gid metadata from OCI
+        # layers under /var/lib/ateom-gvisor. Unpacking image-defined
+        # read-only directories does not require CAP_DAC_OVERRIDE: the
+        # unpacker creates them writable, then restores their final metadata.
         # runAsUser is pinned explicitly rather than relying on the base image's
         # default user.
         securityContext:
@@ -180,6 +184,7 @@ spec:
             - ALL
             add:
             - DAC_OVERRIDE
+            - CHOWN
         # Keep per-node reservations small; omit limits to allow usage to grow
         # with the number of hosted actors.
         resources:
