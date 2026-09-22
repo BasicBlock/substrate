@@ -298,6 +298,13 @@ func TestWaitAll_ReasonSurvivesTheRPCBoundary(t *testing.T) {
 	if got := ateattr.FailureReason(overWire); got != string(ateerrors.ReasonWorkloadNotReady) {
 		t.Errorf("after the RPC hop FailureReason = %q, want %q", got, ateerrors.ReasonWorkloadNotReady)
 	}
+	// ateom has already torn the workload down, so a retry cannot find it
+	// running. Without the crash directive the control plane retries the
+	// start forever and the actor keeps its worker assignment.
+	atelet := asHandlerReturns(overWire)
+	if !ateerrors.ActorCrashRequested(atelet) {
+		t.Errorf("after both RPC hops ActorCrashRequested = false, want true: %v", atelet)
+	}
 }
 
 // asHandlerReturns mimics ateinterceptors: a status error in the chain is

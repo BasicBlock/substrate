@@ -67,7 +67,13 @@ var HTTPClient = func() *http.Client {
 // Every caller is an ateom RPC handler, so a %w-wrapped Reason dies here:
 // errors.As cannot cross a process, and the interceptor would flatten it to a
 // bare codes.Internal, leaving atelet reading UNKNOWN. The ErrorInfo detail is
-// what carries it. Internal and no crash directive both match today's behavior.
+// what carries it.
+//
+// A probe deadline carries the actor-crash directive. Both ateom callers tear
+// the workload down when they return an error, so a retried start cannot
+// adopt it; without the directive the control plane retries the start
+// indefinitely while the actor keeps its worker assignment and rejects
+// deletion. Crashing releases the worker and leaves recovery to revert.
 func WaitAll(ctx context.Context, containers []*ateompb.Container, actorIP string) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, ac := range containers {
@@ -81,7 +87,7 @@ func WaitAll(ctx context.Context, containers []*ateompb.Container, actorIP strin
 	}
 	err := g.Wait()
 	if err != nil && errors.Is(err, ateerrors.ReasonWorkloadNotReady) {
-		return ateerrors.NewGRPCError(ctx, codes.Internal, ateerrors.ReasonWorkloadNotReady, nil, err)
+		return ateerrors.NewGRPCError(ctx, codes.DataLoss, ateerrors.ReasonWorkloadNotReady, ateerrors.ActorCrashedMetadata(), err)
 	}
 	return err
 }
