@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,6 +313,117 @@ func TestSyncer_SoftDelete_MarksDraining(t *testing.T) {
 	}
 	if w.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_DRAINING {
 		t.Errorf("worker state = %v, want DRAINING", w.GetStatus().GetState())
+	}
+}
+
+// TestSyncer_SoftDelete_SuspendsBoundActors verifies that a Terminating worker
+// pod gets its Actors suspended, so they resume elsewhere from a fresh
+// snapshot instead of being stopped with the pod.
+func TestSyncer_SoftDelete_SuspendsBoundActors(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-suspend", "pool1", "worker-suspend", "10.0.0.5"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "one"})
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "two"})
+	s, pods, _ := setupReconcileTest(t, api)
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	mustReconcile(t, ctx, s, seedPod(t, pods, pod))
+
+	waitForSuspendPass(t, s, testPodUID)
+	if got, want := api.suspended(), []string{"a/one", "a/two"}; !slices.Equal(got, want) {
+		t.Errorf("suspended = %v, want %v", got, want)
+	}
+	if got := api.get(testPodUID).GetStatus().GetState(); got != ateapipb.WorkerState_WORKER_STATE_DRAINING {
+		t.Errorf("worker state = %v, want DRAINING", got)
+	}
+}
+
+// TestSyncer_SoftDelete_RetriesFailedSuspendOnNextEvent verifies that a pass
+// survives failing suspends and that the next pod event retries the Actor it
+// could not suspend, while one that was not running is only reported.
+func TestSyncer_SoftDelete_RetriesFailedSuspendOnNextEvent(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-retry", "pool1", "worker-retry", "10.0.0.6"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "flaky"})
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "crashed"})
+	var failFlaky atomic.Bool
+	failFlaky.Store(true)
+	api.setSuspendHook(func(ref *ateapipb.ObjectRef) error {
+		switch {
+		case ref.GetName() == "crashed":
+			return status.Error(codes.FailedPrecondition, "actor is CRASHED")
+		case failFlaky.Load():
+			return status.Error(codes.Unavailable, "atelet unreachable")
+		}
+		return nil
+	})
+	s, pods, _ := setupReconcileTest(t, api)
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	key := seedPod(t, pods, pod)
+	mustReconcile(t, ctx, s, key)
+	waitForSuspendPass(t, s, testPodUID)
+
+	failFlaky.Store(false)
+	mustReconcile(t, ctx, s, key)
+	waitForSuspendPass(t, s, testPodUID)
+
+	// Neither suspend released "crashed", so the second pass tries it again too.
+	if got, want := api.suspended(), []string{"a/flaky", "a/crashed", "a/flaky", "a/crashed"}; !slices.Equal(got, want) {
+		t.Errorf("suspended = %v, want %v", got, want)
+	}
+}
+
+// TestSyncer_SoftDelete_OneSuspendPassAtATime verifies that events arriving
+// while a pass is suspending a Worker's Actors do not start another.
+func TestSyncer_SoftDelete_OneSuspendPassAtATime(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-once", "pool1", "worker-once", "10.0.0.7"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "slow"})
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	api.setSuspendHook(func(*ateapipb.ObjectRef) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	})
+	s, pods, _ := setupReconcileTest(t, api)
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	key := seedPod(t, pods, pod)
+	mustReconcile(t, ctx, s, key)
+	<-entered
+	mustReconcile(t, ctx, s, key)
+	mustReconcile(t, ctx, s, key)
+	close(release)
+	waitForSuspendPass(t, s, testPodUID)
+
+	if got := api.suspended(); len(got) != 1 {
+		t.Errorf("suspended = %v, want a single suspend", got)
+	}
+}
+
+// waitForSuspendPass waits until no suspend pass is running for the Worker.
+func waitForSuspendPass(t *testing.T, s *WorkerPoolSyncer, worker string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(context.Background(), 5*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
+		_, running := s.suspending.Load(worker)
+		return !running, nil
+	})
+	if err != nil {
+		t.Fatalf("suspend pass for worker %s did not finish: %v", worker, err)
 	}
 }
 

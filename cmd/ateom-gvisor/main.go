@@ -78,6 +78,7 @@ var (
 	atunnelEgressListenAddress  = pflag.String("atunnel-egress-listen-address", "0.0.0.0:15001", "Address for transparently intercepted actor egress TCP")
 	egressGatewayTrustBundle    = pflag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "Service DNS trust bundle for the remote egress gateway")
 	readinessListenAddress      = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
+	drainSuspendWait            = pflag.Duration("drain-suspend-wait", 2*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the running actor (a CheckpointWorkload, which ends the session) before stopping it with SIGTERM instead. 0 stops it without waiting.")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
@@ -101,6 +102,10 @@ const workloadGracePeriod = 30 * time.Minute
 
 // resumeTimeout is the conservative ceiling for unpausing a paused sandbox.
 const resumeTimeout = 30 * time.Second
+
+// drainPollInterval is how often awaitSessionEnd looks for the end of the
+// active session. A var so tests can shorten it.
+var drainPollInterval = 250 * time.Millisecond
 
 func main() {
 	pflag.Parse()
@@ -509,6 +514,16 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	// workloadGracePeriod however the time falls between them.
 	deadline := time.Now().Add(workloadGracePeriod)
 
+	// atecontroller suspends the actor of a Terminating worker pod: the
+	// CheckpointWorkload that does it ends the session, and the actor later
+	// resumes on another worker from that snapshot instead of being stopped
+	// with this pod. Give it a bounded head start. A checkpoint still running
+	// when the wait ends holds the lock, so the wait for the lock below lets it
+	// finish.
+	if !s.awaitSessionEnd(ctx, time.Now().Add(min(*drainSuspendWait, workloadGracePeriod))) {
+		slog.WarnContext(ctx, "Actor was not suspended while draining; stopping it", slog.Duration("waited", *drainSuspendWait))
+	}
+
 	// Attempt to acquire the lock used to serialize ateom RPCs. This will wait for any
 	// pending RPCs to finish (suspend, resume, etc...). After the RPCs finish there
 	// should be no active session. The run / resume was cancelled and the
@@ -542,6 +557,36 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	wg.Wait()
 
 	slog.InfoContext(ctx, "Shutting down")
+}
+
+// awaitSessionEnd waits, until until, for the active session to end, and
+// reports whether it did. It holds the RPC lock only to look: a look that
+// finds the lock taken, by the checkpoint it is waiting for or any other RPC,
+// simply tries again later.
+func (s *AteomService) awaitSessionEnd(ctx context.Context, until time.Time) bool {
+	for first := true; ; first = false {
+		probeCtx, cancel := context.WithTimeout(ctx, drainPollInterval)
+		locked := s.lock.LockContext(probeCtx)
+		cancel()
+		if locked {
+			ended := s.activeSession == nil
+			s.lock.Unlock()
+			if ended {
+				return true
+			}
+			if first {
+				slog.InfoContext(ctx, "Waiting for the control plane to suspend the actor before shutting down", slog.Time("until", until))
+			}
+		}
+		if !time.Now().Before(until) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(drainPollInterval):
+		}
+	}
 }
 
 // containerKillTimeout bounds the post-SIGKILL wait, so a completely broken
