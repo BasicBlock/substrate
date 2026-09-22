@@ -68,6 +68,7 @@ var (
 
 	readinessListenAddress = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
 	maxActors              = pflag.Int("max-actors", 1000, "How many actors this worker will host at once")
+	drainSuspendWait       = pflag.Duration("drain-suspend-wait", 2*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the draining actor(s) (a CheckpointWorkload, which ends the session) before stopping them with SIGTERM instead. 0 stops them without waiting.")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
@@ -373,6 +374,18 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	// workloadGracePeriod however the time falls between them.
 	deadline := time.Now().Add(workloadGracePeriod)
 
+	// atecontroller suspends the actor(s) of a Terminating worker pod: the
+	// CheckpointWorkload that does it ends the session, and each actor later
+	// resumes on another worker from that snapshot instead of being stopped
+	// with this pod. Give any in-flight RPCs (chiefly such a checkpoint) a
+	// bounded head start, separate from the rest of the grace period, so a
+	// checkpoint that cannot finish in time does not consume a short SIGTERM
+	// grace period down to nothing.
+	if !s.awaitDrainSuspend(ctx, deadline) {
+		slog.WarnContext(ctx, "Actor was not suspended while draining; stopping it",
+			slog.Duration("waited", *drainSuspendWait), slog.Any("rpcs", s.inFlight.Names()))
+	}
+
 	// Let checkpoints finish saving state before stopping containers.
 	waitCtx, waitCancel := context.WithDeadline(ctx, deadline)
 	defer waitCancel()
@@ -402,6 +415,21 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	wg.Wait()
 
 	slog.InfoContext(ctx, "Shutting down")
+}
+
+// awaitDrainSuspend waits for every in-flight RPC to end — chiefly a
+// CheckpointWorkload that atecontroller's drain-suspend triggers — and
+// reports whether the worker went idle. The wait is bounded by
+// --drain-suspend-wait, further capped by deadline so it never outlives the
+// rest of the drain.
+func (s *AteomService) awaitDrainSuspend(ctx context.Context, deadline time.Time) bool {
+	until := time.Now().Add(*drainSuspendWait)
+	if until.After(deadline) {
+		until = deadline
+	}
+	waitCtx, cancel := context.WithDeadline(ctx, until)
+	defer cancel()
+	return s.inFlight.WaitIdle(waitCtx)
 }
 
 // containerKillTimeout bounds the post-SIGKILL wait, so a completely broken
