@@ -543,7 +543,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		CpuMilli:              req.GetCpuMilli(),
 		MemoryBytes:           req.GetMemoryBytes(),
 	}); err != nil {
-		return nil, fmt.Errorf("while calling ateom.RunWorkload: %w", err)
+		return nil, crashUnlessTransient(ctx, err, "while calling ateom.RunWorkload")
 	}
 
 	return &ateletpb.RunResponse{}, nil
@@ -1247,9 +1247,8 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	})
 	dAteom = time.Since(tAteom)
 	if err != nil {
-		// TODO: classify the errors returned by Ateom and crash the actor if needed.
 		op.failedPhase = ateattr.SnapshotPhaseAteomRestore
-		return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
+		return nil, crashUnlessTransient(ctx, err, "while calling ateom.RestoreWorkload")
 	}
 
 	// Record the (manifest-pinned) sandbox binaries on-node so a subsequent
@@ -1276,39 +1275,47 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	actorUID := req.GetActorUid()
 
-	var assetPaths map[string]string
-	sandboxRec, err := readSandboxRecord(actorUID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read sandbox record during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
-	}
-	paths, err := s.ensureSandboxAssets(ctx, sandboxRec)
-	if err != nil {
-		return nil, fmt.Errorf("failed to ensure sandbox assets during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
-	}
-	assetPaths = paths
-
-	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
-	if err != nil {
-		return nil, fmt.Errorf("failed to dial ateom for terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
-	}
-
 	spec, err := buildAteomWorkloadSpec(req.GetSpec())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid workload spec: %v", err)
 	}
-	if _, err := client.TerminateWorkload(ctx, &ateompb.TerminateWorkloadRequest{
-		Atespace:              req.GetAtespace(),
-		ActorName:             req.GetActorName(),
-		ActorUid:              req.GetActorUid(),
-		ActorTemplateAtespace: req.GetActorTemplateAtespace(),
-		ActorTemplateName:     req.GetActorTemplateName(),
-		RunscPath:             runscPathFor(assetPaths),
-		Spec:                  spec,
-	}); err != nil {
-		if status.Code(err) == codes.NotFound {
-			slog.InfoContext(ctx, "workload not found on ateom during terminate", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
-		} else {
-			return nil, fmt.Errorf("failed calling ateom.TerminateWorkload (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+
+	// Run records the sandbox before starting the workload and Restore records
+	// it only after ateom succeeds, so a missing record means no workload was
+	// ever started here (ateom tears down a failed start itself) or an earlier
+	// Terminate already reclaimed the actor. Either way there is nothing for
+	// ateom to stop; continue reclaiming node state so delete stays idempotent.
+	sandboxRec, err := readSandboxRecord(actorUID)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		slog.InfoContext(ctx, "No sandbox record during terminate; skipping ateom teardown", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
+	case err != nil:
+		return nil, fmt.Errorf("failed to read sandbox record during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+	default:
+		assetPaths, err := s.ensureSandboxAssets(ctx, sandboxRec)
+		if err != nil {
+			return nil, fmt.Errorf("failed to ensure sandbox assets during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+		}
+
+		client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
+		if err != nil {
+			return nil, fmt.Errorf("failed to dial ateom for terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+		}
+
+		if _, err := client.TerminateWorkload(ctx, &ateompb.TerminateWorkloadRequest{
+			Atespace:              req.GetAtespace(),
+			ActorName:             req.GetActorName(),
+			ActorUid:              req.GetActorUid(),
+			ActorTemplateAtespace: req.GetActorTemplateAtespace(),
+			ActorTemplateName:     req.GetActorTemplateName(),
+			RunscPath:             runscPathFor(assetPaths),
+			Spec:                  spec,
+		}); err != nil {
+			if status.Code(err) == codes.NotFound {
+				slog.InfoContext(ctx, "workload not found on ateom during terminate", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
+			} else {
+				return nil, fmt.Errorf("failed calling ateom.TerminateWorkload (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+			}
 		}
 	}
 
