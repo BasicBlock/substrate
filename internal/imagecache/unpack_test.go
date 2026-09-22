@@ -24,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type tarEntry struct {
@@ -35,6 +36,7 @@ type tarEntry struct {
 	uid      int
 	gid      int
 	ownerSet bool
+	modTime  time.Time
 }
 
 func defaultMode(typeflag byte) int64 {
@@ -69,6 +71,10 @@ func buildTar(t *testing.T, entries []tarEntry) []byte {
 			Linkname: e.linkname,
 			Uid:      uid,
 			Gid:      gid,
+			ModTime:  e.modTime,
+		}
+		if !e.modTime.IsZero() {
+			hdr.Format = tar.FormatPAX // sub-second times need PAX records
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatalf("tar.WriteHeader(%+v): %v", hdr, err)
@@ -119,6 +125,30 @@ func TestUnpackLayer_PreservesOwnershipAndSpecialModes(t *testing.T) {
 		}
 		if got := info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky); got != tc.wantMode {
 			t.Errorf("%s mode = %v, want %v", tc.name, got, tc.wantMode)
+		}
+	}
+}
+
+// Build tools and git compare mtimes, so they must survive unpacking,
+// including a directory's, which its children's creation would otherwise bump.
+func TestUnpackLayer_PreservesModTimes(t *testing.T) {
+	dirTime := time.Date(2026, 9, 21, 14, 8, 58, 123456789, time.UTC)
+	fileTime := dirTime.Add(-time.Hour)
+	dir, _, err := runUnpack(t, []tarEntry{
+		{name: "app/", typeflag: tar.TypeDir, modTime: dirTime},
+		{name: "app/package.json", typeflag: tar.TypeReg, body: "{}", modTime: fileTime},
+		{name: "app/linked.json", typeflag: tar.TypeLink, linkname: "app/package.json"},
+	})
+	if err != nil {
+		t.Fatalf("unpackLayer: %v", err)
+	}
+	for name, want := range map[string]time.Time{"app": dirTime, "app/package.json": fileTime, "app/linked.json": fileTime} {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("lstat %s: %v", name, err)
+		}
+		if !info.ModTime().Equal(want) {
+			t.Errorf("%s mtime = %v, want %v", name, info.ModTime().UTC(), want)
 		}
 	}
 }
