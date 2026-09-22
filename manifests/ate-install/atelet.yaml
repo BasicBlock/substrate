@@ -171,9 +171,11 @@ spec:
         # It is owned by the actor's uid, typically 0755, so root has no write
         # access to it and resetActorDirs fails after every checkpoint. It also
         # needs CAP_CHOWN to restore the numeric uid/gid metadata from OCI
-        # layers under /var/lib/ateom-gvisor. Unpacking image-defined
-        # read-only directories does not require CAP_DAC_OVERRIDE: the
-        # unpacker creates them writable, then restores their final metadata.
+        # layers under /var/lib/ateom-gvisor and CAP_FOWNER to restore
+        # permission bits after assigning a non-root owner. Unpacking
+        # image-defined read-only directories does not require
+        # CAP_DAC_OVERRIDE: the unpacker creates them writable, then restores
+        # their final metadata.
         # runAsUser is pinned explicitly rather than relying on the base image's
         # default user.
         securityContext:
@@ -185,6 +187,7 @@ spec:
             add:
             - DAC_OVERRIDE
             - CHOWN
+            - FOWNER
         # Keep per-node reservations small; omit limits to allow usage to grow
         # with the number of hosted actors.
         resources:
