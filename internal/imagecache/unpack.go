@@ -103,6 +103,7 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 		mode os.FileMode
 		uid  int
 		gid  int
+		hdr  *tar.Header
 	}
 
 	// Directories are created owner-writable during extraction (so their children
@@ -213,6 +214,9 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			if err := root.Chmod(name, mode); err != nil {
 				return nil, fmt.Errorf("while restoring mode %v on file %q: %w", mode, name, err)
 			}
+			if err := restoreEntryTimes(root, name, hdr); err != nil {
+				return nil, err
+			}
 
 		case tar.TypeDir:
 			// Create owner-writable so children can be written even when the image
@@ -226,7 +230,7 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			} else if err != nil {
 				return nil, fmt.Errorf("while creating directory=%q, mode=%v: %w", name, mode, err)
 			}
-			dirMetadataByName[name] = dirMetadata{mode: mode, uid: hdr.Uid, gid: hdr.Gid}
+			dirMetadataByName[name] = dirMetadata{mode: mode, uid: hdr.Uid, gid: hdr.Gid, hdr: hdr}
 			declared[name] = true
 			delete(implicit, name)
 
@@ -300,6 +304,10 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 		if err := root.Chmod(name, metadata.mode); err != nil {
 			return nil, fmt.Errorf("while restoring mode %v on directory %q: %w", metadata.mode, name, err)
 		}
+		// After its children exist: creating them updated the directory's mtime.
+		if err := restoreEntryTimes(root, name, metadata.hdr); err != nil {
+			return nil, err
+		}
 	}
 
 	// Keep only implicit candidates that survive in the tree as directories
@@ -330,6 +338,25 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 	sort.Strings(wh.ImplicitDirs)
 
 	return wh, nil
+}
+
+// restoreEntryTimes applies an entry's recorded modification (and access)
+// time. Development tools compare mtimes (git's index, pnpm's repeat-install
+// check, incremental builds), so a tree whose files all carry the unpack time
+// looks entirely modified. Symlinks keep the unpack time: os.Root has no
+// Lchtimes, and Chtimes would follow the link.
+func restoreEntryTimes(root *os.Root, name string, hdr *tar.Header) error {
+	if hdr.ModTime.IsZero() {
+		return nil
+	}
+	atime := hdr.AccessTime
+	if atime.IsZero() {
+		atime = hdr.ModTime
+	}
+	if err := root.Chtimes(name, atime, hdr.ModTime); err != nil {
+		return fmt.Errorf("while restoring times on %q: %w", name, err)
+	}
+	return nil
 }
 
 func restoreEntryOwner(root *os.Root, name string, uid, gid int) error {
