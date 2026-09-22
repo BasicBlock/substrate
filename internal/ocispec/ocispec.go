@@ -99,11 +99,14 @@ func Build(o Options) *specs.Spec {
 				//
 				// TODO(gvisor.dev/issue/3166): support ambient capabilities
 			},
+			// containerd's default. Actors have no privileged helper that could
+			// raise a lower hard limit, and development workloads (package
+			// managers, file watchers, language servers) exhaust 1024.
 			Rlimits: []specs.POSIXRlimit{
 				{
 					Type: "RLIMIT_NOFILE",
-					Hard: 1024,
-					Soft: 1024,
+					Hard: 1048576,
+					Soft: 1048576,
 				},
 			},
 		},
