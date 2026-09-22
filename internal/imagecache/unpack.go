@@ -99,13 +99,18 @@ func validateTarName(name string) (cleaned string, skip bool, err error) {
 // entries).
 func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteoutSet, error) {
 	wh := &whiteoutSet{Version: 1}
+	type dirMetadata struct {
+		mode os.FileMode
+		uid  int
+		gid  int
+	}
 
 	// Directories are created owner-writable during extraction (so their children
 	// can be written even when the image marks them read-only, e.g. ko ships
 	// /ko-app as 0555) and their real modes are restored afterwards. This lets
 	// atelet, running as plain root, unpack arbitrary actor images without
 	// CAP_DAC_OVERRIDE. Keyed by name so a repeated dir entry's last mode wins.
-	dirModes := map[string]os.FileMode{}
+	dirMetadataByName := map[string]dirMetadata{}
 
 	// Ancestors an entry needed vs. directories the tar declared: the
 	// difference is recorded as ImplicitDirs (attrs fabricated, see the
@@ -155,7 +160,7 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			continue
 		}
 
-		mode := hdr.FileInfo().Mode().Perm()
+		mode := hdr.FileInfo().Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
 
 		// A layer tar routinely omits entries for parent directories that
 		// exist in lower layers (e.g. just "etc/nsswitch.conf", with "etc/"
@@ -185,7 +190,7 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			}
 
 			// Stream directly from tarReader to target file to avoid buffering in memory.
-			outFile, err := root.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, mode)
+			outFile, err := root.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, mode.Perm())
 			if err != nil {
 				return nil, fmt.Errorf("while creating file %q: %w", name, err)
 			}
@@ -199,12 +204,21 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			if closeErr != nil {
 				return nil, fmt.Errorf("while closing file %q: %w", name, closeErr)
 			}
+			// Chown can clear setuid/setgid bits, so restore ownership before the
+			// final mode. OCI numeric ids belong to the guest image; host names are
+			// deliberately irrelevant.
+			if err := restoreEntryOwner(root, name, hdr.Uid, hdr.Gid); err != nil {
+				return nil, err
+			}
+			if err := root.Chmod(name, mode); err != nil {
+				return nil, fmt.Errorf("while restoring mode %v on file %q: %w", mode, name, err)
+			}
 
 		case tar.TypeDir:
 			// Create owner-writable so children can be written even when the image
 			// marks the dir read-only; the real mode is restored after extraction
 			// (see dirModes / the restore pass below).
-			err := root.Mkdir(name, mode|0o700)
+			err := root.Mkdir(name, mode.Perm()|0o700)
 			if errors.Is(err, os.ErrExist) {
 				// OCI layers can repeat a directory entry (real ko images do); the
 				// existing dir is already owner-writable, so let the later entry's
@@ -212,7 +226,7 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			} else if err != nil {
 				return nil, fmt.Errorf("while creating directory=%q, mode=%v: %w", name, mode, err)
 			}
-			dirModes[name] = mode
+			dirMetadataByName[name] = dirMetadata{mode: mode, uid: hdr.Uid, gid: hdr.Gid}
 			declared[name] = true
 			delete(implicit, name)
 
@@ -273,14 +287,18 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 	// length-descending order guarantees a directory is restored before any of its
 	// ancestors — restoring a parent to a non-traversable mode then can't block
 	// restoring its children.
-	dirs := make([]string, 0, len(dirModes))
-	for name := range dirModes {
+	dirs := make([]string, 0, len(dirMetadataByName))
+	for name := range dirMetadataByName {
 		dirs = append(dirs, name)
 	}
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	for _, name := range dirs {
-		if err := root.Chmod(name, dirModes[name]); err != nil {
-			return nil, fmt.Errorf("while restoring mode %v on directory %q: %w", dirModes[name], name, err)
+		metadata := dirMetadataByName[name]
+		if err := restoreEntryOwner(root, name, metadata.uid, metadata.gid); err != nil {
+			return nil, err
+		}
+		if err := root.Chmod(name, metadata.mode); err != nil {
+			return nil, fmt.Errorf("while restoring mode %v on directory %q: %w", metadata.mode, name, err)
 		}
 	}
 
@@ -312,4 +330,18 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 	sort.Strings(wh.ImplicitDirs)
 
 	return wh, nil
+}
+
+func restoreEntryOwner(root *os.Root, name string, uid, gid int) error {
+	err := root.Lchown(name, uid, gid)
+	if err == nil {
+		return nil
+	}
+	// Production unpacking runs as root. Tolerating EPERM only for an
+	// unprivileged caller keeps local tooling and tests usable without hiding a
+	// broken production image.
+	if errors.Is(err, os.ErrPermission) && os.Geteuid() != 0 {
+		return nil
+	}
+	return fmt.Errorf("while restoring owner of %q to %d:%d: %w", name, uid, gid, err)
 }
