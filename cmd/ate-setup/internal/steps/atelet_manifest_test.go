@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestAteletCanRestoreOCIFileOwnership(t *testing.T) {
+func TestAteletCanRestoreOCIFileMetadata(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repoRoot(t), "manifests", "ate-install", "atelet.yaml"))
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -57,6 +57,9 @@ func TestAteletCanRestoreOCIFileOwnership(t *testing.T) {
 			got := container.SecurityContext.Capabilities.Add
 			if !slices.Contains(got, corev1.Capability("CHOWN")) {
 				t.Fatalf("atelet added capabilities = %v, want CHOWN for OCI ownership restoration", got)
+			}
+			if !slices.Contains(got, corev1.Capability("FOWNER")) {
+				t.Fatalf("atelet added capabilities = %v, want FOWNER for OCI mode restoration after chown", got)
 			}
 			return
 		}
