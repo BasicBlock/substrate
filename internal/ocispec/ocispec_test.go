@@ -135,6 +135,22 @@ func TestBuild_Capabilities(t *testing.T) {
 	}
 }
 
+// Actors cannot raise their own hard limit, so it must fit development tools.
+func TestBuild_OpenFileLimit(t *testing.T) {
+	spec := Build(Options{ActorUID: testActorUID, ContainerName: "app", Args: []string{"/app"}})
+
+	var got []specs.POSIXRlimit
+	for _, r := range spec.Process.Rlimits {
+		if r.Type == "RLIMIT_NOFILE" {
+			got = append(got, r)
+		}
+	}
+	want := []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 1048576, Soft: 1048576}}
+	if !slices.Equal(got, want) {
+		t.Errorf("RLIMIT_NOFILE = %v, want %v", got, want)
+	}
+}
+
 // The pause container gets no capabilities.
 func TestBuild_NoCapabilitiesForPause(t *testing.T) {
 	spec := Build(Options{ActorUID: testActorUID, ContainerName: PauseContainer, Args: []string{"/pause"}})
