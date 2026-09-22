@@ -159,6 +159,20 @@ func TestShapeGVisor_ProvidesWritableDevShm(t *testing.T) {
 	}
 }
 
+// runc and containerd give every container an /etc/hosts with localhost
+// entries; without one a workload that binds "localhost" (PostgreSQL's default
+// listen_addresses) depends on cluster DNS answering for it, and GKE's does not.
+func TestShapeGVisor_ProvidesEtcHosts(t *testing.T) {
+	for _, name := range []string{PauseContainer, "app"} {
+		spec := Build(parityOptions)
+		ShapeGVisor(spec, GVisorOptions{ActorUID: testActorUID, ContainerName: name, Size: paritySize})
+		m := mountFor(t, spec, "/etc/hosts")
+		if m.Type != "bind" || m.Source != "/etc/hosts" || !slices.Contains(m.Options, "ro") {
+			t.Errorf("%s: /etc/hosts = %+v, want a read-only bind of the worker's /etc/hosts", name, m)
+		}
+	}
+}
+
 // Shaping a spec twice does not accumulate mounts.
 func TestShapeGVisor_Idempotent(t *testing.T) {
 	spec := Build(parityOptions)
