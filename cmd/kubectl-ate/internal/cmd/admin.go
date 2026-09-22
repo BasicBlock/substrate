@@ -15,6 +15,8 @@
 package cmd
 
 import (
+	"context"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/localjwtauthority"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -34,6 +37,8 @@ var (
 	makeCaPoolIDFlag        string
 	makeCaPoolKeyTypeFlag   string
 	makeJwtPoolKeyIDFlag    string
+	poolIfAbsentFlag        bool
+	caCertsFromPoolFlag     string
 )
 
 var adminCmd = &cobra.Command{
@@ -107,13 +112,7 @@ var makeCaPoolCmd = &cobra.Command{
 			},
 		}
 
-		_, err = kc.CoreV1().Secrets(poolSecretNamespaceFlag).Create(ctx, secret, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("while uploading pool state to secret: %w", err)
-		}
-
-		fmt.Printf("Successfully created CA pool secret %s/%s\n", poolSecretNamespaceFlag, poolSecretNameFlag)
-		return nil
+		return createPoolSecret(ctx, kc, secret, poolIfAbsentFlag)
 	},
 }
 
@@ -158,14 +157,77 @@ var makeJwtPoolCmd = &cobra.Command{
 			},
 		}
 
-		_, err = kc.CoreV1().Secrets(poolSecretNamespaceFlag).Create(ctx, secret, metav1.CreateOptions{})
+		return createPoolSecret(ctx, kc, secret, poolIfAbsentFlag)
+	},
+}
+
+var makeCACertsCmd = &cobra.Command{
+	Use:   "make-ca-certs",
+	Short: "Make a secret that publishes the trust anchors of an existing CA pool secret, without its keys",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+
+		kconfig, err := ateclient.LoadKubeConfig(kubeconfig, k8sContext)
 		if err != nil {
-			return fmt.Errorf("while uploading pool state to secret: %w", err)
+			return fmt.Errorf("while reading kubeconfig: %w", err)
 		}
 
-		fmt.Printf("Successfully created JWT authority pool secret %s/%s\n", poolSecretNamespaceFlag, poolSecretNameFlag)
-		return nil
+		kc, err := kubernetes.NewForConfig(kconfig)
+		if err != nil {
+			return fmt.Errorf("while creating Kubernetes client: %w", err)
+		}
+
+		pool, err := kc.CoreV1().Secrets(poolSecretNamespaceFlag).Get(ctx, caCertsFromPoolFlag, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("while reading CA pool secret %s/%s: %w", poolSecretNamespaceFlag, caCertsFromPoolFlag, err)
+		}
+		secret, err := caCertsSecret(pool, poolSecretNamespaceFlag, poolSecretNameFlag)
+		if err != nil {
+			return err
+		}
+		return createPoolSecret(ctx, kc, secret, poolIfAbsentFlag)
 	},
+}
+
+// createPoolSecret creates secret. With ifAbsent an existing secret of the same
+// name is kept unchanged and counts as success, so a release hook can rerun
+// without replacing issued key material.
+func createPoolSecret(ctx context.Context, kc kubernetes.Interface, secret *corev1.Secret, ifAbsent bool) error {
+	_, err := kc.CoreV1().Secrets(secret.Namespace).Create(ctx, secret, metav1.CreateOptions{})
+	switch {
+	case err == nil:
+		fmt.Printf("Successfully created secret %s/%s\n", secret.Namespace, secret.Name)
+		return nil
+	case ifAbsent && apierrors.IsAlreadyExists(err):
+		fmt.Printf("Secret %s/%s already exists; keeping it\n", secret.Namespace, secret.Name)
+		return nil
+	default:
+		return fmt.Errorf("while creating secret %s/%s: %w", secret.Namespace, secret.Name, err)
+	}
+}
+
+// caCertsSecret derives a secret holding only the PEM trust anchors of the CA
+// pool stored in pool, for consumers that must verify but never sign.
+func caCertsSecret(pool *corev1.Secret, namespace, name string) (*corev1.Secret, error) {
+	concrete, err := localca.Unmarshal(pool.Data["pool"])
+	if err != nil {
+		return nil, fmt.Errorf("while parsing CA pool secret %s/%s: %w", pool.Namespace, pool.Name, err)
+	}
+	anchors, err := concrete.TrustAnchors()
+	if err != nil {
+		return nil, fmt.Errorf("while reading trust anchors of %s/%s: %w", pool.Namespace, pool.Name, err)
+	}
+	if len(anchors) == 0 {
+		return nil, fmt.Errorf("CA pool secret %s/%s has no trust anchors", pool.Namespace, pool.Name)
+	}
+	var bundle []byte
+	for _, cert := range anchors {
+		bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Data:       map[string][]byte{"ca.crt": bundle},
+	}, nil
 }
 
 func init() {
@@ -183,4 +245,15 @@ func init() {
 	makeJwtPoolCmd.Flags().StringVar(&poolSecretNameFlag, "name", "", "Create the secret with this name")
 	_ = makeJwtPoolCmd.MarkFlagRequired("name")
 	adminCmd.AddCommand(makeJwtPoolCmd)
+
+	makeCACertsCmd.Flags().StringVar(&caCertsFromPoolFlag, "from-pool", "", "Name of the CA pool secret whose trust anchors to publish")
+	makeCACertsCmd.Flags().StringVar(&poolSecretNamespaceFlag, "secret-namespace", "default", "Namespace of both the pool secret and the created secret")
+	makeCACertsCmd.Flags().StringVar(&poolSecretNameFlag, "name", "", "Create the secret with this name")
+	_ = makeCACertsCmd.MarkFlagRequired("from-pool")
+	_ = makeCACertsCmd.MarkFlagRequired("name")
+	adminCmd.AddCommand(makeCACertsCmd)
+
+	for _, c := range []*cobra.Command{makeCaPoolCmd, makeJwtPoolCmd, makeCACertsCmd} {
+		c.Flags().BoolVar(&poolIfAbsentFlag, "if-absent", false, "Keep an existing secret of the same name unchanged instead of failing")
+	}
 }
