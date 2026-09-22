@@ -29,6 +29,10 @@ const PauseContainer = "_pause"
 // resolvConf is the sandbox resolver path and default bind source.
 const resolvConf = "/etc/resolv.conf"
 
+// etcHosts is the worker's kubelet-managed hosts file bound into the sandbox,
+// as runc and containerd provide one: it carries the localhost entries.
+const etcHosts = "/etc/hosts"
+
 // devShm is the POSIX shared-memory mount. gVisor's synthetic /dev creates it
 // as a root-owned 0755 directory, which non-root workloads cannot write.
 const devShm = "/dev/shm"
@@ -52,7 +56,7 @@ func GVisorCgroupLeaf(actorUID, containerName string) string {
 }
 
 // ShapeGVisor adds runsc CRI annotations, durable-dir mount hints, /dev/shm,
-// host resolv.conf, and per-container cgroups to the spec. It is idempotent.
+// host resolv.conf and hosts, and per-container cgroups to the spec. It is idempotent.
 func ShapeGVisor(spec *specs.Spec, o GVisorOptions) {
 	if spec.Annotations == nil {
 		spec.Annotations = make(map[string]string)
@@ -80,18 +84,23 @@ func ShapeGVisor(spec *specs.Spec, o GVisorOptions) {
 		})
 	}
 
-	// Insert resolv.conf before any volume bind mounts.
-	if !slices.ContainsFunc(spec.Mounts, func(m specs.Mount) bool { return m.Destination == resolvConf }) {
+	// Insert resolv.conf and hosts before any volume bind mounts.
+	for _, file := range []string{resolvConf, etcHosts} {
+		if slices.ContainsFunc(spec.Mounts, func(m specs.Mount) bool { return m.Destination == file }) {
+			continue
+		}
 		i := slices.IndexFunc(spec.Mounts, func(m specs.Mount) bool { return m.Type == "bind" })
 		if i < 0 {
 			i = len(spec.Mounts)
 		}
-		source := o.ResolvConf
-		if source == "" {
-			source = resolvConf
+		// resolv.conf may come from the sandbox's own network (o.ResolvConf);
+		// hosts is always the worker's.
+		source := file
+		if file == resolvConf && o.ResolvConf != "" {
+			source = o.ResolvConf
 		}
 		spec.Mounts = slices.Insert(spec.Mounts, i, specs.Mount{
-			Destination: resolvConf,
+			Destination: file,
 			Type:        "bind",
 			Source:      source,
 			Options:     []string{"ro"},
