@@ -1233,3 +1233,46 @@ func TestPromoteSnapshotRecordsUpload(t *testing.T) {
 		t.Errorf("state after a retried promote = %v, want %v", got, st)
 	}
 }
+
+// A restore that fails before atelet records the sandbox binaries leaves no
+// sandbox record, and ateom has already torn down whatever it started. Delete
+// must still reclaim the actor, and a retried Terminate must succeed: the
+// record is gone after the first one too.
+func TestTerminateWithoutSandboxRecord(t *testing.T) {
+	useTempNodeDirs(t)
+	ctx := t.Context()
+
+	const actorUID = "01234567-89ab-cdef-0123-456789abcdef"
+	ateom := &fakeWorker{}
+	serveFakeWorker(t, ateom)
+
+	actorDir := ateletpath.ActorPath(actorUID)
+	if err := os.MkdirAll(filepath.Join(actorDir, "bundles"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	s := &Atelet{
+		workerDialer:      newWorkerDialer(1),
+		systemInfoVolumes: newSystemInfoVolumeRefresher(nil, nil),
+	}
+	req := &ateletpb.TerminateRequest{
+		Atespace:              "ate-demo",
+		ActorName:             "never-started",
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		WorkerPodUid:          "5f1c0d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "app", Image: "example.invalid/app:v1"}}},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := s.Terminate(ctx, req); err != nil {
+			t.Fatalf("Terminate attempt %d: %v", attempt, err)
+		}
+	}
+	if got := ateom.actorDirs["TerminateWorkload"]; got != nil {
+		t.Errorf("TerminateWorkload was called on ateom (%v), want skipped without a sandbox record", got)
+	}
+	if _, err := os.Stat(actorDir); !os.IsNotExist(err) {
+		t.Errorf("actor dir survived terminate (stat err = %v)", err)
+	}
+}
