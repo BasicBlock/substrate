@@ -250,3 +250,43 @@ func TestLocalSnapshotGC(t *testing.T) {
 		t.Errorf("reading actor dir %s: %v", actorDir, err)
 	}
 }
+
+// A restore that fails before atelet records the sandbox binaries leaves no
+// sandbox record, and ateom has already torn down whatever it started. Delete
+// must still reclaim the actor, and a retried Terminate must succeed: the
+// record is gone after the first one too.
+func TestTerminateWithoutSandboxRecord(t *testing.T) {
+	useTempNodeDirs(t)
+	ctx := t.Context()
+
+	const actorUID = "actor-uid-never-started"
+	ateom := &fakeAteom{}
+	serveFakeAteom(t, ateom)
+
+	actorDir := ateompath.ActorPath(actorUID)
+	if err := os.MkdirAll(filepath.Join(actorDir, "bundles"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	s := &AteomHerder{
+		ateomDialer:       newAteomDialer(1),
+		systemInfoVolumes: newSystemInfoVolumeRefresher(nil, nil),
+	}
+	req := &ateletpb.TerminateRequest{
+		Atespace:              "ate-demo",
+		ActorName:             "never-started",
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		TargetAteomUid:        "ateom-uid-1",
+		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "app", Image: "example.invalid/app:v1"}}},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := s.Terminate(ctx, req); err != nil {
+			t.Fatalf("Terminate attempt %d: %v", attempt, err)
+		}
+	}
+	if _, err := os.Stat(actorDir); !os.IsNotExist(err) {
+		t.Errorf("actor dir survived terminate (stat err = %v)", err)
+	}
+}
