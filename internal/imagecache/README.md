@@ -106,6 +106,13 @@ layer diffIDs in order — layers shared by N images exist once.
 5. **Record**: the image config + diffID list is written under the
    requested digest (and the per-platform child digest for multi-arch refs).
 
+Actor starts are not the only caller. atelet also prewarms: the pause images
+of SandboxConfigs, and (`--template-image-prewarm-interval`, every minute by
+default) the container images of the ActorTemplates whose sandbox class and
+worker selector match a WorkerPool with a pod on the node. Both go through
+`EnsureImage`, so a prewarm and an actor start of the same image collapse
+into one pull.
+
 `prepareOCIDirectory` in atelet then writes `rootfs-overlay.json`
 (`OverlaySpec`) into the bundle next to `config.json`, listing the layer
 directories bottom-first plus any `ExtraDirs` (in-rootfs bind-mount targets,

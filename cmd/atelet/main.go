@@ -331,6 +331,15 @@ func main() {
 	}
 	defer ateapiConn.Close()
 
+	// Pull the images of the templates this node's workers can run before
+	// their first actor needs them. Best-effort, like the SandboxConfig
+	// prewarm: the pull inside an actor start remains the correctness path.
+	var nodeWorkerPools func(context.Context) map[string]workerPoolRef
+	if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
+		nodeWorkerPools = newWorkerPoolFetcher(k8sClient, nodeName)
+	}
+	startTemplateImagePrewarm(ctx, *templateImagePrewarmInterval, ateapipb.NewControlClient(ateapiConn), imageCache, nodeWorkerPools)
+
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(*port))
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to listen", err)
