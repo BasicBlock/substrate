@@ -162,9 +162,15 @@ func TestSetupBundleRootfs_ZeroLayers(t *testing.T) {
 	if err != nil || !fi.IsDir() {
 		t.Errorf("ExtraDir not created in rootfs: fi=%v err=%v", fi, err)
 	}
-	for _, d := range []string{"upper", "work"} {
+	for d, wantMode := range map[string]os.FileMode{
+		"rootfs": 0o755,
+		"upper":  0o755,
+		"work":   0o700,
+	} {
 		if fi, err := os.Stat(filepath.Join(bundle, d)); err != nil || !fi.IsDir() {
 			t.Errorf("bundle dir %q missing: %v", d, err)
+		} else if got := fi.Mode().Perm(); got != wantMode {
+			t.Errorf("bundle dir %q mode = %o, want %o", d, got, wantMode)
 		}
 	}
 }
