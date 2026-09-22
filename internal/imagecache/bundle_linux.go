@@ -61,9 +61,26 @@ func SetupBundleRootfs(bundlePath string) error {
 	rootfs := filepath.Join(bundlePath, "rootfs")
 	upper := filepath.Join(bundlePath, "upper")
 	work := filepath.Join(bundlePath, "work")
-	for _, d := range []string{rootfs, upper, work} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return fmt.Errorf("while creating %q: %w", d, err)
+	// Overlayfs exposes the upper directory's mode as the merged root mode.
+	// Keep the root and upper searchable by image-defined non-root users; a
+	// 0700 upper makes every absolute path inaccessible after setuid(2), even
+	// when the image's files and directories have correct OCI metadata. The
+	// work directory remains private to the overlay implementation.
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: rootfs, mode: 0o755},
+		{path: upper, mode: 0o755},
+		{path: work, mode: 0o700},
+	} {
+		if err := os.MkdirAll(d.path, d.mode); err != nil {
+			return fmt.Errorf("while creating %q: %w", d.path, err)
+		}
+		// prepareOCIDirectory may have created this directory with a stricter
+		// mode. MkdirAll does not update an existing directory.
+		if err := os.Chmod(d.path, d.mode); err != nil {
+			return fmt.Errorf("while setting mode on %q: %w", d.path, err)
 		}
 	}
 
