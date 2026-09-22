@@ -158,12 +158,6 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1 API in
-	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
-	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
-	// clusters), client-go will print out a warning every time it initializes.
-	config.WarningHandlerWithContext = &rest.NoWarnings{}
-
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create k8s client: %w", err)
@@ -214,12 +208,6 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
-
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1 API in
-	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
-	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
-	// clusters), client-go will print out a warning every time it initializes.
-	config.WarningHandlerWithContext = &rest.NoWarnings{}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
