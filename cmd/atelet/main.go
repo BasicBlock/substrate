@@ -1299,17 +1299,28 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	actorUID := req.GetActorUid()
 
+	// Run records the sandbox before starting the workload and Restore records
+	// it only after ateom succeeds, so a missing record means no workload was
+	// ever started here (ateom tears down a failed start itself) or an earlier
+	// Terminate already reclaimed the actor. Either way there is nothing for
+	// ateom to stop; continue reclaiming node state so delete stays idempotent.
+	var sandboxRec *sandboxAssetsRecord
 	if req.GetWorkerPodUid() != "" {
-		var assetPaths map[string]string
-		sandboxRec, err := readSandboxRecord(actorUID)
-		if err != nil {
+		rec, err := readSandboxRecord(actorUID)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			slog.InfoContext(ctx, "No sandbox record during terminate; skipping ateom teardown", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
+		case err != nil:
 			return nil, fmt.Errorf("failed to read sandbox record during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+		default:
+			sandboxRec = rec
 		}
+	}
+	if sandboxRec != nil {
 		paths, err := s.ensureSandboxAssets(ctx, sandboxRec)
 		if err != nil {
 			return nil, fmt.Errorf("failed to ensure sandbox assets during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 		}
-		assetPaths = paths
 
 		client, err := s.dialAteom(ctx, req.GetWorkerPodUid())
 		if err != nil {
@@ -1326,7 +1337,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 			ActorUid:              req.GetActorUid(),
 			ActorTemplateAtespace: req.GetActorTemplateAtespace(),
 			ActorTemplateName:     req.GetActorTemplateName(),
-			RunscPath:             runscPathFor(assetPaths),
+			RunscPath:             runscPathFor(paths),
 			Spec:                  spec,
 			ActorDirs:             ateletpath.ActorDirs(actorUID),
 		}); err != nil {
