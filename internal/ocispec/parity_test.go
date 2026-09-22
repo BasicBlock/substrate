@@ -144,6 +144,21 @@ func TestShapeGVisor_ResolvConfPrecedesVolumes(t *testing.T) {
 	}
 }
 
+// gVisor's /dev is a root-owned 0755 synthetic filesystem, so without a
+// runtime-provided /dev/shm a non-root process (PostgreSQL after dropping to
+// its image-defined user) cannot create POSIX shared memory. runc, containerd
+// and the micro-VM guest all mount a world-writable sticky tmpfs there.
+func TestShapeGVisor_ProvidesWritableDevShm(t *testing.T) {
+	for _, name := range []string{PauseContainer, "app"} {
+		spec := Build(parityOptions)
+		ShapeGVisor(spec, GVisorOptions{ActorUID: testActorUID, ContainerName: name, Size: paritySize})
+		m := mountFor(t, spec, "/dev/shm")
+		if m.Type != "tmpfs" || !slices.Contains(m.Options, "mode=1777") {
+			t.Errorf("%s: /dev/shm = %+v, want a tmpfs with mode=1777", name, m)
+		}
+	}
+}
+
 // Shaping a spec twice does not accumulate mounts.
 func TestShapeGVisor_Idempotent(t *testing.T) {
 	spec := Build(parityOptions)
