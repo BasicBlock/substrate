@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -31,6 +32,9 @@ type tarEntry struct {
 	mode     int64
 	body     string
 	linkname string
+	uid      int
+	gid      int
+	ownerSet bool
 }
 
 func defaultMode(typeflag byte) int64 {
@@ -53,12 +57,18 @@ func buildTar(t *testing.T, entries []tarEntry) []byte {
 		if mode == 0 {
 			mode = defaultMode(e.typeflag)
 		}
+		uid, gid := e.uid, e.gid
+		if !e.ownerSet {
+			uid, gid = os.Geteuid(), os.Getegid()
+		}
 		hdr := &tar.Header{
 			Name:     e.name,
 			Typeflag: e.typeflag,
 			Mode:     mode,
 			Size:     int64(len(e.body)),
 			Linkname: e.linkname,
+			Uid:      uid,
+			Gid:      gid,
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatalf("tar.WriteHeader(%+v): %v", hdr, err)
@@ -73,6 +83,44 @@ func buildTar(t *testing.T, entries []tarEntry) []byte {
 		t.Fatalf("tar.Close: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func TestUnpackLayer_PreservesOwnershipAndSpecialModes(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("ownership preservation requires root")
+	}
+
+	entries := []tarEntry{
+		{name: "var/lib/postgresql/", typeflag: tar.TypeDir, mode: 0o2770, uid: 1234, gid: 2345, ownerSet: true},
+		{name: "usr/bin/postgres", typeflag: tar.TypeReg, mode: 0o4755, body: "postgres", uid: 1234, gid: 2345, ownerSet: true},
+	}
+	dir, _, err := runUnpack(t, entries)
+	if err != nil {
+		t.Fatalf("unpackLayer: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		wantMode os.FileMode
+	}{
+		{name: "var/lib/postgresql", wantMode: os.ModeSetgid | 0o770},
+		{name: "usr/bin/postgres", wantMode: os.ModeSetuid | 0o755},
+	} {
+		info, err := os.Lstat(filepath.Join(dir, tc.name))
+		if err != nil {
+			t.Fatalf("lstat %s: %v", tc.name, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("%s stat has type %T, want *syscall.Stat_t", tc.name, info.Sys())
+		}
+		if stat.Uid != 1234 || stat.Gid != 2345 {
+			t.Errorf("%s owner = %d:%d, want 1234:2345", tc.name, stat.Uid, stat.Gid)
+		}
+		if got := info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky); got != tc.wantMode {
+			t.Errorf("%s mode = %v, want %v", tc.name, got, tc.wantMode)
+		}
+	}
 }
 
 func unpackInto(t *testing.T, dir string, tarBytes []byte) (*whiteoutSet, error) {
