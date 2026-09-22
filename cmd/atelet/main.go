@@ -274,7 +274,7 @@ func main() {
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
 			o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedTrustBundles[EgressTrustBundleName]).String()
 		}))
-	clusterTrustBundles := clusterTrustBundleInformerFactory.Certificates().V1beta1().ClusterTrustBundles()
+	clusterTrustBundles := clusterTrustBundleInformerFactory.Certificates().V1().ClusterTrustBundles()
 	systemInfoVolumes := newSystemInfoVolumeRefresher(clusterTrustBundles.Lister(), clusterTrustBundles.Informer())
 
 	stopCh := make(chan struct{})

@@ -22,7 +22,7 @@ import (
 	"reflect"
 	"testing"
 
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	certsv1 "k8s.io/api/certificates/v1"
 )
 
 func TestPublicKeyFromStubPKCS10Request(t *testing.T) {
@@ -35,8 +35,8 @@ func TestPublicKeyFromStubPKCS10Request(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := PublicKey(&certsv1beta1.PodCertificateRequest{
-		Spec: certsv1beta1.PodCertificateRequestSpec{
+	got, err := PublicKey(&certsv1.PodCertificateRequest{
+		Spec: certsv1.PodCertificateRequestSpec{
 			StubPKCS10Request: csr,
 		},
 	})
@@ -48,31 +48,8 @@ func TestPublicKeyFromStubPKCS10Request(t *testing.T) {
 	}
 }
 
-func TestPublicKeyFallsBackToPKIXPublicKey(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkix, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := PublicKey(&certsv1beta1.PodCertificateRequest{
-		Spec: certsv1beta1.PodCertificateRequestSpec{
-			PKIXPublicKey: pkix, //nolint:staticcheck // SA1019: exercising the deprecated-field fallback in PublicKey.
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, &key.PublicKey) {
-		t.Fatalf("got %#v, want %#v", got, &key.PublicKey)
-	}
-}
-
 func TestPublicKeyRequiresKeyMaterial(t *testing.T) {
-	_, err := PublicKey(&certsv1beta1.PodCertificateRequest{})
+	_, err := PublicKey(&certsv1.PodCertificateRequest{})
 	if err == nil {
 		t.Fatal("got nil error, want error")
 	}

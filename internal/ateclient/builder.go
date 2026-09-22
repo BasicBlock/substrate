@@ -158,7 +158,7 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1beta1 API in
+	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1 API in
 	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
 	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
 	// clusters), client-go will print out a warning every time it initializes.
@@ -215,7 +215,7 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1beta1 API in
+	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1 API in
 	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
 	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
 	// clusters), client-go will print out a warning every time it initializes.
@@ -268,7 +268,7 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 }
 
 func serverTLSConfig(ctx context.Context, clientset kubernetes.Interface) (*tls.Config, error) {
-	ctbs, err := clientset.CertificatesV1beta1().ClusterTrustBundles().List(ctx, metav1.ListOptions{
+	ctbs, err := clientset.CertificatesV1().ClusterTrustBundles().List(ctx, metav1.ListOptions{
 		LabelSelector: liveBundleSelector,
 	})
 	if err != nil {

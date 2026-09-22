@@ -33,8 +33,8 @@ import (
 )
 
 var requiredBetaAPIs = []string{
-	"certificates.k8s.io/v1beta1/podcertificaterequests",
-	"certificates.k8s.io/v1beta1/clustertrustbundles",
+	"certificates.k8s.io/v1/podcertificaterequests",
+	"certificates.k8s.io/v1/clustertrustbundles",
 }
 
 func deleteCluster(ctx context.Context, cfg *Config) error {
