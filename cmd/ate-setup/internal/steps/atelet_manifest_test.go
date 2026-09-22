@@ -61,6 +61,9 @@ func TestAteletCanRestoreOCIFileMetadata(t *testing.T) {
 			if !slices.Contains(got, corev1.Capability("FOWNER")) {
 				t.Fatalf("atelet added capabilities = %v, want FOWNER for OCI mode restoration after chown", got)
 			}
+			if !slices.Contains(got, corev1.Capability("FSETID")) {
+				t.Fatalf("atelet added capabilities = %v, want FSETID to preserve OCI setgid bits for non-root groups", got)
+			}
 			return
 		}
 	}
