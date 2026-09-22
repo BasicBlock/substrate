@@ -21,17 +21,19 @@ import (
 )
 
 // RemoveAllWritable removes path and everything under it, first making every
-// directory owner-writable so its children can be unlinked. Unpacked image
-// trees keep the image's (possibly read-only) directory modes, which atelet
-// cannot remove as plain root without CAP_DAC_OVERRIDE — os.RemoveAll alone
-// fails there with EACCES. atelet owns these files, so chmod needs no
-// capability.
+// directory root-owned and owner-writable so its children can be unlinked.
+// Unpacked image trees keep the image's numeric owners and (possibly
+// read-only) directory modes, which atelet cannot traverse or remove as root
+// without CAP_DAC_OVERRIDE — os.RemoveAll alone fails there with EACCES.
+// Restoring root ownership uses the CAP_CHOWN that unpacking already needs;
+// chmod after chown needs no further capability.
 func RemoveAllWritable(path string) error {
 	// Make dirs traversable/writable top-down (WalkDir visits a directory before
-	// reading it, so chmod here lets the walk descend into otherwise-unreadable
-	// dirs). Best-effort: ignore errors and let os.RemoveAll surface real ones.
+	// reading it, so chown+chmod here lets the walk descend into otherwise-
+	// unreadable dirs, including image dirs owned by a non-root uid). Best-effort: ignore errors and let os.RemoveAll surface real ones.
 	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && d.IsDir() {
+			_ = os.Lchown(p, 0, 0)
 			_ = os.Chmod(p, 0o700)
 		}
 		return nil
