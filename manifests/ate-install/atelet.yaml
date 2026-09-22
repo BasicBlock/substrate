@@ -160,8 +160,10 @@ spec:
         - --drain-timeout=5m
         # atelet does no mounts, netlink, device, or namespace operations (those
         # live in the ateom worker pod). It needs CAP_CHOWN to restore the numeric
-        # uid/gid metadata from OCI layers under /var/lib/ateom-gvisor and
-        # CAP_FOWNER to restore permission bits after assigning a non-root owner.
+        # uid/gid metadata from OCI layers under /var/lib/ateom-gvisor,
+        # CAP_FOWNER to restore permission bits after assigning a non-root owner,
+        # and CAP_FSETID so chmod keeps setgid bits on entries whose group root
+        # is not a member of (the kernel silently clears S_ISGID otherwise).
         # Unpacking image-defined read-only directories does not require
         # CAP_DAC_OVERRIDE: the unpacker creates them writable, then restores
         # their final metadata.
@@ -176,6 +178,7 @@ spec:
             add:
             - CHOWN
             - FOWNER
+            - FSETID
         # Keep per-node reservations small; omit limits to allow usage to grow
         # with the number of hosted actors.
         resources:
