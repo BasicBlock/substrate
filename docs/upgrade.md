@@ -205,19 +205,20 @@ Each warning comes back at the step where the mistake becomes possible.
 > [!WARNING]
 > **Do not edit a serving worker pool, and do not scale it down.** The
 > controller would roll the pool's Deployment straight through live
-> actors. A deleted worker pod does go through the eviction path:
-> `SIGTERM` is forwarded into the actor's containers and the control
-> plane keeps accepting a suspend for 30 minutes, so an actor suspended
-> inside that window saves its state and stays resumable. Handling
-> `SIGTERM` by exiting cleanly is not enough on its own; the suspend has
-> to reach the control plane and finish. An actor still awake when the
-> window closes moves to `ACTOR_STATE_CRASHED`: `resume` and `suspend`
-> are both refused, and everything since its last snapshot is lost. Call
-> `RevertActor` (`kubectl ate revert`) to discard the crashed run and
-> return the actor to `ACTOR_STATE_SUSPENDED` at its last external snapshot
-> so it can be resumed. Scaling a serving pool down removes pods the same
-> way, without suspending the actors on them. (Step 4 clones the pool; it
-> never edits it.)
+> actors. A deleted worker pod does go through the eviction path: the
+> controller suspends its actor, and the worker holds `SIGTERM` for up
+> to `--drain-suspend-wait` (2 minutes) while that suspend starts, so
+> the actor saves its state and resumes elsewhere. An actor that is not
+> suspended in that window has `SIGTERM` forwarded into its containers,
+> and the control plane keeps accepting a suspend for the rest of 30
+> minutes. Handling `SIGTERM` by exiting cleanly is not enough on its
+> own; the suspend has to reach the control plane and finish. An actor
+> still awake when the window closes moves to `ACTOR_STATE_CRASHED`:
+> `resume` and `suspend` are both refused, and everything since its last
+> snapshot is lost. Call `RevertActor` (`kubectl ate revert`) to discard
+> the crashed run and return the actor to `ACTOR_STATE_SUSPENDED` at its
+> last external snapshot so it can be resumed. (Step 4 clones the pool;
+> it never edits it.)
 
 > [!WARNING]
 > **On GKE, do not touch the node pool's label until every node is

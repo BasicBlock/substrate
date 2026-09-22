@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"sync"
 	"time"
 
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
@@ -46,6 +47,11 @@ const workerPodLabel = "ate.dev/worker-pool"
 // workerPoolIndex maps a WorkerPool namespace/name to the worker Pods labeled
 // as members of that pool.
 const workerPoolIndex = "worker-pool"
+
+// drainSuspendTimeout bounds one pass suspending a draining Worker's Actors.
+// ateom stops an Actor that no suspend has reached within its own shutdown
+// budget (30 minutes), so trying for longer cannot help.
+const drainSuspendTimeout = 30 * time.Minute
 
 // workerKey identifies the pod incarnation a queued event concerns. namespace
 // and name locate the pod in the informer, which is indexed by namespace/name
@@ -104,6 +110,10 @@ type WorkerPoolSyncer struct {
 	// can shrink it without writing state another test's syncer is reading.
 	listBackoff time.Duration
 	listCap     time.Duration
+
+	// suspending holds the names of Workers with a suspend pass in progress,
+	// so repeated events on a Terminating pod start at most one at a time.
+	suspending sync.Map
 }
 
 // NewWorkerPoolSyncer creates a new WorkerPoolSyncer.
@@ -263,11 +273,16 @@ func (s *WorkerPoolSyncer) reconcile(ctx context.Context, key workerKey) error {
 	// transition and leave the worker schedulable for as long as the pod lingers.
 	if pod.DeletionTimestamp != nil {
 		// The pod has entered Terminating: mark the worker DRAINING so the
-		// scheduler stops routing new actors to it. We deliberately do NOT touch
-		// the bound actor here — inside the pod ateom has received SIGTERM and is
-		// gracefully shutting the actor down. Actor cleanup happens on the Pod
-		// Deleted event.
-		return s.markWorkerDraining(ctx, key)
+		// scheduler stops routing new actors to it, then suspend the actor it
+		// hosts, so the actor resumes elsewhere from a snapshot of its current
+		// state instead of being stopped with the pod. ateom holds its SIGTERM
+		// for that suspend (--drain-suspend-wait) and stops the actor only if
+		// none arrives. Record cleanup happens on the Pod Deleted event.
+		if err := s.markWorkerDraining(ctx, key); err != nil {
+			return err
+		}
+		s.suspendDrainingActors(ctx, key)
+		return nil
 	}
 	if !isWorkerEligible(pod) {
 		// The pod has no IP or is not Ready yet; a later update event re-enqueues it.
@@ -388,6 +403,61 @@ func (s *WorkerPoolSyncer) markWorkerDraining(ctx context.Context, key workerKey
 		return nil
 	}
 	return err
+}
+
+// suspendDrainingActors suspends the Actors bound to a draining Worker in the
+// background: SuspendActor checkpoints the actor and uploads its snapshot,
+// which takes long enough that it must not hold a queue worker. At most one
+// pass runs per Worker, and every later event on the Terminating pod starts
+// another once it has finished, so an Actor whose suspend failed is retried;
+// a pass over a Worker with nothing bound is a single list.
+func (s *WorkerPoolSyncer) suspendDrainingActors(ctx context.Context, key workerKey) {
+	name := key.workerName()
+	if _, running := s.suspending.LoadOrStore(name, struct{}{}); running {
+		return
+	}
+	go func() {
+		defer s.suspending.Delete(name)
+		ctx, cancel := context.WithTimeout(ctx, drainSuspendTimeout)
+		defer cancel()
+		for _, actor := range s.boundActors(ctx, key) {
+			attrs := append(key.logAttrs(), slog.String("actor", actor.GetAtespace()+"/"+actor.GetName()))
+			_, err := s.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: actor})
+			switch status.Code(err) {
+			case codes.OK:
+				slog.InfoContext(ctx, "Syncer: suspended actor of draining worker", attrs...)
+			case codes.NotFound, codes.FailedPrecondition:
+				// Deleted, or not running (resuming, crashed, already
+				// suspended by someone else): nothing to save here.
+				slog.InfoContext(ctx, "Syncer: not suspending actor of draining worker", append(attrs, slog.Any("err", err))...)
+			default:
+				slog.WarnContext(ctx, "Syncer: suspending actor of draining worker failed", append(attrs, slog.Any("err", err))...)
+			}
+		}
+	}()
+}
+
+// boundActors lists the Actors assigned to a Worker. A Worker already gone has
+// none; any other failure is logged and ends the listing early.
+func (s *WorkerPoolSyncer) boundActors(ctx context.Context, key workerKey) []*ateapipb.ObjectRef {
+	var actors []*ateapipb.ObjectRef
+	req := &ateapipb.ListWorkerActorAssignmentsRequest{Worker: key.workerRef()}
+	for {
+		resp, err := s.client.ListWorkerActorAssignments(ctx, req)
+		if err != nil {
+			if status.Code(err) != codes.NotFound {
+				slog.WarnContext(ctx, "Syncer: listing actors of draining worker failed", append(key.logAttrs(), slog.Any("err", err))...)
+			}
+			return actors
+		}
+		for _, assignment := range resp.GetActorAssignments() {
+			actors = append(actors, assignment.GetActor())
+		}
+		if resp.GetNextPageToken() == "" {
+			return actors
+		}
+		req.PageToken = resp.GetNextPageToken()
+	}
 }
 
 // reconcileDeadWorker cleans up a worker whose pod is gone. DeleteWorker

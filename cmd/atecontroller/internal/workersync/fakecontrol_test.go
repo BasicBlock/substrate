@@ -34,7 +34,9 @@ import (
 // It reproduces the behavior the syncer is written against and nothing more:
 // server-assigned uid and version, the uid+version precondition every update
 // carries, the NOT_FOUND / ALREADY_EXISTS / ABORTED codes, a DrainWorker that
-// is idempotent down to leaving the version alone, and paged ListWorkers.
+// is idempotent down to leaving the version alone, and paged ListWorkers. It
+// also answers ListWorkerActorAssignments from assignments a test seeds and
+// records every SuspendActor, which is how a draining Worker's Actors leave.
 //
 // Request validation is not mirrored — that is the server's own contract, and
 // duplicating it here would only test the copy. A test that needs a rejection
@@ -60,10 +62,90 @@ type fakeControl struct {
 	// listPageSize overrides the requested page size when positive, so a
 	// handful of workers can be made to span several pages.
 	listPageSize int
+
+	// assignments maps a Worker name to the Actors bound to it.
+	assignments map[string][]*ateapipb.ObjectRef
+	// suspendHook, when set, decides SuspendActor's outcome.
+	suspendHook func(*ateapipb.ObjectRef) error
+	// suspends records every SuspendActor call, in order.
+	suspends []string
 }
 
 func newFakeControl() *fakeControl {
-	return &fakeControl{workers: map[string]*ateapipb.Worker{}}
+	return &fakeControl{workers: map[string]*ateapipb.Worker{}, assignments: map[string][]*ateapipb.ObjectRef{}}
+}
+
+// bind records actor as assigned to the named Worker.
+func (f *fakeControl) bind(worker string, actor *ateapipb.ObjectRef) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.assignments[worker] = append(f.assignments[worker], actor)
+}
+
+func (f *fakeControl) setSuspendHook(hook func(*ateapipb.ObjectRef) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suspendHook = hook
+}
+
+// suspended returns the atespace/name of every Actor SuspendActor was called
+// for, in call order.
+func (f *fakeControl) suspended() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.suspends)
+}
+
+// ListWorkerActorAssignments answers one Actor per page, so a Worker with
+// several exercises the paging.
+func (f *fakeControl) ListWorkerActorAssignments(_ context.Context, in *ateapipb.ListWorkerActorAssignmentsRequest, _ ...grpc.CallOption) (*ateapipb.ListWorkerActorAssignmentsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	name := in.GetWorker().GetName()
+	if _, ok := f.workers[name]; !ok {
+		return nil, status.Errorf(codes.NotFound, "Worker %s not found", name)
+	}
+	bound := f.assignments[name]
+	start := 0
+	if in.GetPageToken() != "" {
+		var err error
+		if start, err = strconv.Atoi(in.GetPageToken()); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "bad page token %q", in.GetPageToken())
+		}
+	}
+	resp := &ateapipb.ListWorkerActorAssignmentsResponse{}
+	if start < len(bound) {
+		resp.ActorAssignments = []*ateapipb.ActorAssignment{{Actor: proto.Clone(bound[start]).(*ateapipb.ObjectRef)}}
+		if start+1 < len(bound) {
+			resp.NextPageToken = strconv.Itoa(start + 1)
+		}
+	}
+	return resp, nil
+}
+
+// SuspendActor records the call and releases the Actor from its Worker, as a
+// completed suspend does.
+func (f *fakeControl) SuspendActor(_ context.Context, in *ateapipb.SuspendActorRequest, _ ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
+	ref := in.GetActor()
+	f.mu.Lock()
+	f.suspends = append(f.suspends, ref.GetAtespace()+"/"+ref.GetName())
+	hook := f.suspendHook
+	f.mu.Unlock()
+	// Outside the lock: a hook may block to hold the suspend in progress while
+	// the test drives other calls.
+	if hook != nil {
+		if err := hook(ref); err != nil {
+			return nil, err
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for worker, bound := range f.assignments {
+		f.assignments[worker] = slices.DeleteFunc(bound, func(a *ateapipb.ObjectRef) bool { return proto.Equal(a, ref) })
+	}
+	return &ateapipb.SuspendActorResponse{}, nil
 }
 
 // get returns the registered worker by name, or nil if there is none.
