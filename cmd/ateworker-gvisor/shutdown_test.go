@@ -24,6 +24,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/agent-substrate/substrate/internal/actorlock"
 )
 
 // fakeRuntime stands in for *runsc. It records the signals killContainer
@@ -194,4 +196,77 @@ func TestKillContainerHonorsParentCancellation(t *testing.T) {
 	if got := f.sentSignals(); !reflect.DeepEqual(got, []string{"SIGTERM"}) {
 		t.Errorf("signals delivered = %v, want [SIGTERM]", got)
 	}
+}
+
+// TestAwaitDrainSuspend covers the drain's head start for a suspend: an idle
+// worker has nothing to wait for, an in-flight RPC (standing in for the
+// CheckpointWorkload atecontroller's drain-suspend triggers) that ends within
+// the budget ends the wait early, one that outlives --drain-suspend-wait is
+// given up on at that bound, one that outlives a shorter overall deadline is
+// capped by that instead, and a cancelled context stops the wait at once.
+func TestAwaitDrainSuspend(t *testing.T) {
+	oldWait := *drainSuspendWait
+	t.Cleanup(func() { *drainSuspendWait = oldWait })
+
+	t.Run("idle worker", func(t *testing.T) {
+		*drainSuspendWait = time.Second
+		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		if !s.awaitDrainSuspend(context.Background(), time.Now().Add(time.Minute)) {
+			t.Error("awaitDrainSuspend with nothing in flight = false, want true")
+		}
+	})
+
+	t.Run("suspended while waiting", func(t *testing.T) {
+		*drainSuspendWait = 10 * time.Second
+		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		release := s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			release()
+		}()
+		if !s.awaitDrainSuspend(context.Background(), time.Now().Add(time.Minute)) {
+			t.Error("awaitDrainSuspend after the RPC ended = false, want true")
+		}
+	})
+
+	t.Run("never suspended, bounded by drain-suspend-wait", func(t *testing.T) {
+		*drainSuspendWait = 50 * time.Millisecond
+		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
+		start := time.Now()
+		if s.awaitDrainSuspend(context.Background(), start.Add(time.Minute)) {
+			t.Error("awaitDrainSuspend with a live RPC = true, want false")
+		}
+		if waited := time.Since(start); waited < *drainSuspendWait {
+			t.Errorf("awaitDrainSuspend returned after %v, before its %v budget", waited, *drainSuspendWait)
+		}
+	})
+
+	t.Run("capped by a shorter overall deadline", func(t *testing.T) {
+		*drainSuspendWait = time.Minute
+		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
+		start := time.Now()
+		if s.awaitDrainSuspend(context.Background(), start.Add(30*time.Millisecond)) {
+			t.Error("awaitDrainSuspend with a live RPC = true, want false")
+		}
+		if waited := time.Since(start); waited > 5*time.Second {
+			t.Errorf("awaitDrainSuspend outlived its deadline, waited %v", waited)
+		}
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		*drainSuspendWait = 10 * time.Second
+		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		if s.awaitDrainSuspend(ctx, start.Add(10*time.Second)) {
+			t.Error("awaitDrainSuspend with a cancelled context = true, want false")
+		}
+		if waited := time.Since(start); waited > 5*time.Second {
+			t.Errorf("awaitDrainSuspend ignored cancellation for %v", waited)
+		}
+	})
 }
