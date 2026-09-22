@@ -19,25 +19,17 @@ import (
 	"crypto/x509"
 	"fmt"
 
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	certsv1 "k8s.io/api/certificates/v1"
 )
 
 // PublicKey extracts the subject public key from a PodCertificateRequest.
-func PublicKey(pcr *certsv1beta1.PodCertificateRequest) (crypto.PublicKey, error) {
+func PublicKey(pcr *certsv1.PodCertificateRequest) (crypto.PublicKey, error) {
 	if len(pcr.Spec.StubPKCS10Request) > 0 {
 		csr, err := x509.ParseCertificateRequest(pcr.Spec.StubPKCS10Request)
 		if err != nil {
 			return nil, fmt.Errorf("while parsing stub PKCS#10 request: %w", err)
 		}
 		return csr.PublicKey, nil
-	}
-
-	if len(pcr.Spec.PKIXPublicKey) > 0 { //nolint:staticcheck // SA1019: PKIXPublicKey kept for transition alongside StubPKCS10Request.
-		subjectPublicKey, err := x509.ParsePKIXPublicKey(pcr.Spec.PKIXPublicKey) //nolint:staticcheck // SA1019: same as above.
-		if err != nil {
-			return nil, fmt.Errorf("while parsing PKIX public key: %w", err)
-		}
-		return subjectPublicKey, nil
 	}
 
 	return nil, fmt.Errorf("pod certificate request does not contain a public key")

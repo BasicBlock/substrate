@@ -143,7 +143,7 @@ func waitForEgressTrustBundle(t *testing.T, ctx context.Context, clients *Client
 	var last string
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		ctb, err := clients.K8s.CertificatesV1beta1().ClusterTrustBundles().Get(ctx, EgressTrustBundleObjectName, metav1.GetOptions{})
+		ctb, err := clients.K8s.CertificatesV1().ClusterTrustBundles().Get(ctx, EgressTrustBundleObjectName, metav1.GetOptions{})
 		if err == nil {
 			if got := ctb.Spec.TrustBundle; got == want || (want == "" && got != "") {
 				return

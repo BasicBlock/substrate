@@ -29,7 +29,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/localca"
 	"github.com/agent-substrate/substrate/internal/substratex509"
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	certsv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,7 +41,7 @@ import (
 
 // makePodAndPCR returns a pod and a matching PodCertificateRequest with no
 // key material set; callers fill in StubPKCS10Request.
-func makePodAndPCR(namespace, podName, serviceAccount string, maxExpirationSeconds int32) (*corev1.Pod, *certsv1beta1.PodCertificateRequest) {
+func makePodAndPCR(namespace, podName, serviceAccount string, maxExpirationSeconds int32) (*corev1.Pod, *certsv1.PodCertificateRequest) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
@@ -49,12 +49,12 @@ func makePodAndPCR(namespace, podName, serviceAccount string, maxExpirationSecon
 			UID:       types.UID("pod-uid-1"),
 		},
 	}
-	pcr := &certsv1beta1.PodCertificateRequest{
+	pcr := &certsv1.PodCertificateRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      "req-1",
 		},
-		Spec: certsv1beta1.PodCertificateRequestSpec{
+		Spec: certsv1.PodCertificateRequestSpec{
 			SignerName:           Name,
 			PodName:              pod.ObjectMeta.Name,
 			PodUID:               pod.ObjectMeta.UID,
@@ -216,11 +216,11 @@ func TestMakeCert(t *testing.T) {
 					t.Fatalf("MakeCert: %v", err)
 				}
 
-				gotPCR, err := kc.CertificatesV1beta1().PodCertificateRequests(tc.namespace).Get(context.Background(), "req-1", metav1.GetOptions{})
+				gotPCR, err := kc.CertificatesV1().PodCertificateRequests(tc.namespace).Get(context.Background(), "req-1", metav1.GetOptions{})
 				if err != nil {
 					t.Fatalf("while fetching updated PCR: %v", err)
 				}
-				if len(gotPCR.Status.Conditions) != 1 || gotPCR.Status.Conditions[0].Type != certsv1beta1.PodCertificateRequestConditionTypeIssued {
+				if len(gotPCR.Status.Conditions) != 1 || gotPCR.Status.Conditions[0].Type != certsv1.PodCertificateRequestConditionTypeIssued {
 					t.Fatalf("PCR status not marked Issued: %+v", gotPCR.Status.Conditions)
 				}
 
@@ -355,7 +355,7 @@ func TestMakeCertErrors(t *testing.T) {
 				t.Fatalf("MakeCert: got nil error, want error")
 			}
 
-			gotPCR, err := kc.CertificatesV1beta1().PodCertificateRequests("ate-system").Get(context.Background(), "req-1", metav1.GetOptions{})
+			gotPCR, err := kc.CertificatesV1().PodCertificateRequests("ate-system").Get(context.Background(), "req-1", metav1.GetOptions{})
 			if err != nil {
 				t.Fatalf("while fetching PCR: %v", err)
 			}

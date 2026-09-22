@@ -25,7 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/podcertcontroller/internal/podcertificate"
 	"github.com/agent-substrate/substrate/cmd/podcertcontroller/internal/signercontroller"
 	"github.com/agent-substrate/substrate/internal/localca"
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	certsv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -54,7 +54,7 @@ func (h *Impl) SignerName() string {
 	return Name
 }
 
-func (h *Impl) DesiredClusterTrustBundles() ([]*certsv1beta1.ClusterTrustBundle, error) {
+func (h *Impl) DesiredClusterTrustBundles() ([]*certsv1.ClusterTrustBundle, error) {
 	name := CTBPrefix + "primary-bundle"
 
 	trustAnchors, err := h.caPool.TrustAnchors()
@@ -71,25 +71,25 @@ func (h *Impl) DesiredClusterTrustBundles() ([]*certsv1beta1.ClusterTrustBundle,
 		_, _ = wantTrustBundle.Write(block)
 	}
 
-	wantCTB := &certsv1beta1.ClusterTrustBundle{
+	wantCTB := &certsv1.ClusterTrustBundle{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
 				"podcert.ate.dev/canarying": "live",
 			},
 		},
-		Spec: certsv1beta1.ClusterTrustBundleSpec{
+		Spec: certsv1.ClusterTrustBundleSpec{
 			SignerName:  Name,
 			TrustBundle: wantTrustBundle.String(),
 		},
 	}
 
-	return []*certsv1beta1.ClusterTrustBundle{
+	return []*certsv1.ClusterTrustBundle{
 		wantCTB,
 	}, nil
 }
 
-func (h *Impl) MakeCert(ctx context.Context, pcr *certsv1beta1.PodCertificateRequest) error {
+func (h *Impl) MakeCert(ctx context.Context, pcr *certsv1.PodCertificateRequest) error {
 	// TODO: Switch from live reads to indexer
 
 	// If our signer had a policy about which pods are allowed to request
@@ -197,7 +197,7 @@ func (h *Impl) MakeCert(ctx context.Context, pcr *certsv1beta1.PodCertificateReq
 	pcr = pcr.DeepCopy()
 	pcr.Status.Conditions = []metav1.Condition{
 		{
-			Type:               certsv1beta1.PodCertificateRequestConditionTypeIssued,
+			Type:               certsv1.PodCertificateRequestConditionTypeIssued,
 			Status:             metav1.ConditionTrue,
 			Reason:             "Reason",
 			Message:            "Issued",
@@ -209,7 +209,7 @@ func (h *Impl) MakeCert(ctx context.Context, pcr *certsv1beta1.PodCertificateReq
 	pcr.Status.BeginRefreshAt = ptr.To(metav1.NewTime(beginRefreshAt))
 	pcr.Status.NotAfter = ptr.To(metav1.NewTime(notAfter))
 
-	_, err = h.kc.CertificatesV1beta1().PodCertificateRequests(pcr.ObjectMeta.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
+	_, err = h.kc.CertificatesV1().PodCertificateRequests(pcr.ObjectMeta.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("while updating PodCertificateRequest: %w", err)
 	}
