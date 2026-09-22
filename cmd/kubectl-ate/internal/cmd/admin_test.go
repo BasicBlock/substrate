@@ -16,8 +16,11 @@ package cmd
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -28,6 +31,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/agent-substrate/substrate/internal/localca"
 	"github.com/agent-substrate/substrate/internal/localjwtauthority"
 )
 
@@ -255,5 +259,67 @@ func TestListJWTKeys(t *testing.T) {
 		"         next     RS256\n"
 	if diff := cmp.Diff(want, out.String()); diff != "" {
 		t.Errorf("output (-want +got):\n%s", diff)
+	}
+}
+
+// A release hook reruns on every upgrade. It must never replace existing key
+// material, and must not fail because the material already exists.
+func TestCreatePoolSecretIfAbsentKeepsExistingKeys(t *testing.T) {
+	ctx := t.Context()
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ate-system", Name: "actor-id-jwt-pool"},
+		Data:       map[string][]byte{"pool": []byte("original")},
+	}
+	kc := fake.NewClientset(existing)
+
+	replacement := existing.DeepCopy()
+	replacement.Data["pool"] = []byte("replacement")
+	created, err := createPoolSecret(ctx, kc, replacement, true)
+	if err != nil || created {
+		t.Fatalf("createPoolSecret(ifAbsent) on existing secret = %v, %v; want false, nil", created, err)
+	}
+	got, err := kc.CoreV1().Secrets("ate-system").Get(ctx, "actor-id-jwt-pool", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Data["pool"]) != "original" {
+		t.Errorf("pool = %q, want the original key material kept", got.Data["pool"])
+	}
+	if _, err := createPoolSecret(ctx, kc, replacement, false); err == nil {
+		t.Error("createPoolSecret without ifAbsent succeeded on an existing secret, want an error")
+	}
+}
+
+func TestCACertsSecretPublishesPoolTrustAnchors(t *testing.T) {
+	ca, err := localca.GenerateCA("1", localca.KeyTypeED25519, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolBytes, err := localca.Marshal(&localca.ConcretePool{CAs: []*localca.CA{ca}, ActiveForSigning: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ate-system", Name: "actor-id-ca-pool"},
+		Data:       map[string][]byte{"pool": poolBytes, corev1.TLSPrivateKeyKey: []byte("private")},
+	}
+
+	got, err := caCertsSecret(pool, "ate-system", "actor-id-ca-certs")
+	if err != nil {
+		t.Fatalf("caCertsSecret: %v", err)
+	}
+	if _, ok := got.Data[corev1.TLSPrivateKeyKey]; ok || len(got.Data) != 1 {
+		t.Fatalf("published keys = %v, want only ca.crt", got.Data)
+	}
+	block, rest := pem.Decode(got.Data["ca.crt"])
+	if block == nil || len(rest) != 0 {
+		t.Fatalf("ca.crt is not exactly one PEM certificate: %q", got.Data["ca.crt"])
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cert.Equal(ca.RootCertificate) {
+		t.Error("ca.crt does not hold the pool's root certificate")
 	}
 }
