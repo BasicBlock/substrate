@@ -37,7 +37,15 @@ import (
 const ateomOTelResourceAttributes = "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID),k8s.node.name=$(NODE_NAME),service.instance.id=$(POD_UID)"
 
 // workerTerminationGracePeriodSeconds is the hardcoded pod termination grace
-// period for worker pods (60 minutes).
+// period for worker pods (60 minutes). ateom's own shutdown budget
+// (workloadGracePeriod, 30 minutes in cmd/ateom-gvisor and cmd/ateom-microvm)
+// nests entirely inside it with an hour of slack for kubelet's own SIGKILL
+// escalation and whatever ateom spends past its deadline finishing a
+// container kill. ateom-gvisor's --drain-suspend-wait (a head start for the
+// controller's suspend of a draining worker's Actor before ateom falls back
+// to SIGTERM) shares that same 30-minute budget rather than adding to it — see
+// gracefulShutdown in cmd/ateom-gvisor/main.go — so raising it stays safe as
+// long as it, too, stays well under workloadGracePeriod.
 const workerTerminationGracePeriodSeconds int64 = 3600
 
 // Rollout settings for the pool's Deployment. A pool edit rolls the workers
