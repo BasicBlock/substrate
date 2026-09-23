@@ -88,7 +88,43 @@ type SandboxConfigSpec struct {
 	//
 	// +optional
 	Assets map[string]map[string]AssetFile `json:"assets,omitempty"`
+
+	// CPUFeatures levels a gVisor sandbox's guest CPUID to the intersection of
+	// the host's CPU features and this list, via runsc's
+	// dev.gvisor.internal.cpufeatures OCI annotation. At checkpoint, gVisor
+	// records that levelled set instead of the raw host CPU, so the snapshot
+	// can later restore on any worker whose CPU is a superset of it -- letting
+	// a WorkerPool span more than one CPU model. See
+	// https://github.com/agent-substrate/substrate/issues/1657.
+	//
+	// Compute the value by running `runsc cpu-features` on every node model a
+	// pool running this config may schedule onto, and intersecting the
+	// printed feature names.
+	//
+	// This only affects sandboxes created after the field is set: an existing
+	// snapshot keeps whatever raw feature set it was checkpointed with, and
+	// restoring it is governed entirely by that recorded set, not by this
+	// field. Leave it empty (the default) to keep today's behavior of
+	// exposing the raw host feature set.
+	//
+	// x86_64 (amd64) only: gVisor's FeatureSet intersection is not supported
+	// on ARM64. A SandboxConfig that declares arm64 assets must leave this
+	// empty, and it is otherwise rejected for anything but the gvisor
+	// sandboxClass.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	CPUFeatures []CPUFeatureName `json:"cpuFeatures,omitempty"`
 }
+
+// CPUFeatureName is a gVisor CPU feature name, as `runsc cpu-features` prints
+// it and as gVisor's cpuid package names it (e.g. "avx512f", "fsgsbase",
+// "3dnow"): lowercase ASCII letters, digits, and underscores.
+//
+// +kubebuilder:validation:MaxLength=32
+// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9_]*$`
+type CPUFeatureName string
 
 // SandboxConfig is cluster-scoped configuration describing the sandbox binaries
 // for a sandbox runtime family. It is referenced by an ActorTemplate's

@@ -102,6 +102,41 @@ spec:
                   intentionally generic; per-class requirements are enforced by a
                   ValidatingAdmissionPolicy.
                 type: object
+              cpuFeatures:
+                description: |-
+                  CPUFeatures levels a gVisor sandbox's guest CPUID to the intersection of
+                  the host's CPU features and this list, via runsc's
+                  dev.gvisor.internal.cpufeatures OCI annotation. At checkpoint, gVisor
+                  records that levelled set instead of the raw host CPU, so the snapshot
+                  can later restore on any worker whose CPU is a superset of it -- letting
+                  a WorkerPool span more than one CPU model. See
+                  https://github.com/agent-substrate/substrate/issues/1657.
+
+                  Compute the value by running `runsc cpu-features` on every node model a
+                  pool running this config may schedule onto, and intersecting the
+                  printed feature names.
+
+                  This only affects sandboxes created after the field is set: an existing
+                  snapshot keeps whatever raw feature set it was checkpointed with, and
+                  restoring it is governed entirely by that recorded set, not by this
+                  field. Leave it empty (the default) to keep today's behavior of
+                  exposing the raw host feature set.
+
+                  x86_64 (amd64) only: gVisor's FeatureSet intersection is not supported
+                  on ARM64. A SandboxConfig that declares arm64 assets must leave this
+                  empty, and it is otherwise rejected for anything but the gvisor
+                  sandboxClass.
+                items:
+                  description: |-
+                    CPUFeatureName is a gVisor CPU feature name, as `runsc cpu-features` prints
+                    it and as gVisor's cpuid package names it (e.g. "avx512f", "fsgsbase",
+                    "3dnow"): lowercase ASCII letters, digits, and underscores.
+                  maxLength: 32
+                  pattern: ^[a-z0-9][a-z0-9_]*$
+                  type: string
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: set
               pauseImage:
                 description: |-
                   PauseImage is the container image used as the root sandbox container.
