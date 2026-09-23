@@ -54,10 +54,27 @@ func withPauseImage(sc *SandboxConfig, image string) *SandboxConfig {
 	return sc
 }
 
+// withCPUFeatures overrides the CPU feature allow-list on an otherwise-valid
+// config.
+func withCPUFeatures(sc *SandboxConfig, features ...CPUFeatureName) *SandboxConfig {
+	sc.Spec.CPUFeatures = features
+	return sc
+}
+
 func runscAsset() AssetFile { return AssetFile{URL: "gs://bucket/runsc", SHA256: validSHA256} }
 
 func gvisorAsset() AssetFile {
 	return AssetFile{URL: "gs://bucket/gvisor.tar.bz2", SHA256: validSHA256}
+}
+
+// manyCPUFeatures returns n distinct, pattern-valid feature names, to exercise
+// the MaxItems bound.
+func manyCPUFeatures(n int) []CPUFeatureName {
+	out := make([]CPUFeatureName, n)
+	for i := range out {
+		out[i] = CPUFeatureName(fmt.Sprintf("feature%d", i))
+	}
+	return out
 }
 
 // microVMAssets returns a full, valid micro-VM asset set for one architecture:
@@ -202,6 +219,52 @@ func TestSandboxConfigValidation(t *testing.T) {
 		sc:      withPauseImage(sandboxConfig("bad-unpinned-pause", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}}), "registry.k8s.io/pause:3.10.2"),
 		wantErr: true,
 		errMsg:  "All images must include a digest",
+	}, {
+		// CPU feature leveling (agent-substrate/substrate#1657).
+		name: "valid gvisor with cpuFeatures, amd64-only",
+		sc: withCPUFeatures(
+			sandboxConfig("ok-gvisor-cpufeatures", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}}),
+			"avx512f", "fsgsbase", "3dnow"),
+		wantErr: false,
+	}, {
+		name:    "empty cpuFeatures is a no-op",
+		sc:      withCPUFeatures(sandboxConfig("ok-gvisor-empty-cpufeatures", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}})),
+		wantErr: false,
+	}, {
+		name: "cpuFeatures rejected on microvm",
+		sc: withCPUFeatures(
+			sandboxConfig("bad-microvm-cpufeatures", "microvm", map[string]map[string]AssetFile{"amd64": microVMAssets()}),
+			"avx512f"),
+		wantErr: true,
+		errMsg:  "spec.cpuFeatures is only supported on a gvisor SandboxConfig",
+	}, {
+		name: "cpuFeatures rejected when the config also declares arm64 assets",
+		sc: withCPUFeatures(
+			sandboxConfig("bad-gvisor-arm64-cpufeatures", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}, "arm64": {"gvisor": gvisorAsset()}}),
+			"avx512f"),
+		wantErr: true,
+		errMsg:  "x86_64-only",
+	}, {
+		name: "cpuFeatures rejects an uppercase feature name",
+		sc: withCPUFeatures(
+			sandboxConfig("bad-cpufeature-case", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}}),
+			"AVX512F"),
+		wantErr: true,
+		errMsg:  "cpuFeatures",
+	}, {
+		name: "cpuFeatures rejects a duplicate entry",
+		sc: withCPUFeatures(
+			sandboxConfig("bad-cpufeature-dup", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}}),
+			"avx512f", "avx512f"),
+		wantErr: true,
+		errMsg:  "cpuFeatures",
+	}, {
+		name: "cpuFeatures rejects more than 64 entries",
+		sc: withCPUFeatures(
+			sandboxConfig("bad-cpufeature-toomany", SandboxClassGvisor, map[string]map[string]AssetFile{"amd64": {"gvisor": gvisorAsset()}}),
+			manyCPUFeatures(65)...),
+		wantErr: true,
+		errMsg:  "cpuFeatures",
 	}}
 
 	for _, tt := range tests {
