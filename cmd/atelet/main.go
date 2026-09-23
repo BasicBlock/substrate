@@ -566,6 +566,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		EgressGateway:         toAteomEgressGateway(req.GetEgressGateway()),
 		CpuMilli:              req.GetCpuMilli(),
 		MemoryBytes:           req.GetMemoryBytes(),
+		CpuFeatures:           sandboxRec.CPUFeatures,
 	}); err != nil {
 		return nil, fmt.Errorf("while calling ateom.RunWorkload: %w", err)
 	}
@@ -1271,6 +1272,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		EgressGateway:         toAteomEgressGateway(req.GetEgressGateway()),
 		CpuMilli:              req.GetCpuMilli(),
 		MemoryBytes:           req.GetMemoryBytes(),
+		CpuFeatures:           runtimeRec.CPUFeatures,
 	})
 	dAteom = time.Since(tAteom)
 	if err != nil {

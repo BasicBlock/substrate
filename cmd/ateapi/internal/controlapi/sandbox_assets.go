@@ -77,6 +77,7 @@ func sandboxAssetsProto(sc *atev1alpha1.SandboxConfig) *ateletpb.SandboxAssets {
 	out := &ateletpb.SandboxAssets{
 		SandboxClass: string(sc.Spec.SandboxClass),
 		PauseImage:   sc.Spec.PauseImage,
+		CpuFeatures:  cpuFeatureStrings(sc.Spec.CPUFeatures),
 		Assets:       make(map[string]*ateletpb.ArchAssets, len(sc.Spec.Assets)),
 	}
 	for arch, files := range sc.Spec.Assets {
@@ -85,6 +86,19 @@ func sandboxAssetsProto(sc *atev1alpha1.SandboxConfig) *ateletpb.SandboxAssets {
 			archAssets.Files[name] = &ateletpb.AssetFile{Url: f.URL, Sha256: f.SHA256}
 		}
 		out.Assets[arch] = archAssets
+	}
+	return out
+}
+
+// cpuFeatureStrings projects the CRD's typed feature list onto the plain
+// []string the proto (and everything downstream) carries.
+func cpuFeatureStrings(features []atev1alpha1.CPUFeatureName) []string {
+	if len(features) == 0 {
+		return nil
+	}
+	out := make([]string, len(features))
+	for i, f := range features {
+		out[i] = string(f)
 	}
 	return out
 }

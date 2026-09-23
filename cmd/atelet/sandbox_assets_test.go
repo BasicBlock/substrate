@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -222,5 +223,40 @@ func TestRecordFromRequest(t *testing.T) {
 				t.Error("recordFromRequest succeeded, want an error")
 			}
 		})
+	}
+}
+
+// TestRecordFromRequest_CPUFeatures pins CPU-feature leveling
+// (agent-substrate/substrate#1657) surviving the projection onto the local
+// node's on-disk sandbox record: set on the request, it lands in the record;
+// unset, the record carries none.
+func TestRecordFromRequest_CPUFeatures(t *testing.T) {
+	sa := func(features []string) *ateletpb.SandboxAssets {
+		return &ateletpb.SandboxAssets{
+			SandboxClass: "gvisor",
+			PauseImage:   "gcr.io/gke-release/pause@sha256:x",
+			CpuFeatures:  features,
+			Assets: map[string]*ateletpb.ArchAssets{
+				runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
+					"gvisor": {Url: "gs://bucket/gvisor.tar.zstd", Sha256: "abc"},
+				}},
+			},
+		}
+	}
+
+	rec, err := recordFromRequest(sa([]string{"avx512f", "fsgsbase"}))
+	if err != nil {
+		t.Fatalf("recordFromRequest() error = %v", err)
+	}
+	if want := []string{"avx512f", "fsgsbase"}; !slices.Equal(rec.CPUFeatures, want) {
+		t.Errorf("CPUFeatures = %v, want %v", rec.CPUFeatures, want)
+	}
+
+	rec, err = recordFromRequest(sa(nil))
+	if err != nil {
+		t.Fatalf("recordFromRequest() error = %v", err)
+	}
+	if len(rec.CPUFeatures) != 0 {
+		t.Errorf("CPUFeatures = %v, want empty when unset", rec.CPUFeatures)
 	}
 }
