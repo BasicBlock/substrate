@@ -582,6 +582,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		actorDirs:      req.GetActorDirs(),
 		size:           sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 		durableVolumes: durableVolumeNames(req.GetSpec()),
+		cpuFeatures:    req.GetCpuFeatures(),
 	}
 	var containersToDelete []string
 	defer func() {
@@ -877,6 +878,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		actorDirs:      req.GetActorDirs(),
 		size:           sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 		durableVolumes: durableVolumeNames(req.GetSpec()),
+		cpuFeatures:    req.GetCpuFeatures(),
 	}
 	var containersToDelete []string
 	defer func() {

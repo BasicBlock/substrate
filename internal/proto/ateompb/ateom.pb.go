@@ -463,9 +463,14 @@ type RunWorkloadRequest struct {
 	// sizes the sandbox to these (cgroup caps via the OCI spec, and for the
 	// micro-VM the VM's vCPU count and memory). Zero means "unset": keep the
 	// runtime default (unlimited for gVisor, ateom's own default for the micro-VM).
-	CpuMilli      int64      `protobuf:"varint,11,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
-	MemoryBytes   int64      `protobuf:"varint,12,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
-	ActorDirs     *ActorDirs `protobuf:"bytes,13,opt,name=actor_dirs,json=actorDirs,proto3" json:"actor_dirs,omitempty"`
+	CpuMilli    int64      `protobuf:"varint,11,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
+	MemoryBytes int64      `protobuf:"varint,12,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	ActorDirs   *ActorDirs `protobuf:"bytes,13,opt,name=actor_dirs,json=actorDirs,proto3" json:"actor_dirs,omitempty"`
+	// cpu_features, when non-empty, levels the gVisor sandbox's guest CPUID to
+	// the intersection of the host's CPU features and this list, via runsc's
+	// dev.gvisor.internal.cpufeatures OCI annotation (ignored by the micro-VM
+	// runtime). Empty keeps the raw host feature set. x86_64 (amd64) only.
+	CpuFeatures   []string `protobuf:"bytes,14,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -580,6 +585,13 @@ func (x *RunWorkloadRequest) GetMemoryBytes() int64 {
 func (x *RunWorkloadRequest) GetActorDirs() *ActorDirs {
 	if x != nil {
 		return x.ActorDirs
+	}
+	return nil
+}
+
+func (x *RunWorkloadRequest) GetCpuFeatures() []string {
+	if x != nil {
+		return x.CpuFeatures
 	}
 	return nil
 }
@@ -1360,8 +1372,17 @@ type RestoreWorkloadRequest struct {
 	// actor_dirs.restore_dir is a preserved local snapshot, not a scratch copy:
 	// ateom must not delete or modify files in it.
 	PreserveRestoreDir bool `protobuf:"varint,17,opt,name=preserve_restore_dir,json=preserveRestoreDir,proto3" json:"preserve_restore_dir,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// cpu_features, when non-empty, levels the gVisor sandbox's guest CPUID to
+	// the intersection of the host's CPU features and this list, via runsc's
+	// dev.gvisor.internal.cpufeatures OCI annotation (ignored by the micro-VM
+	// runtime). Empty keeps the raw host feature set. x86_64 (amd64) only.
+	// Reapplied on restore for consistency with the create path; gVisor itself
+	// only consults the annotation at initial sandbox boot -- what a restore
+	// actually requires of the host is the feature set already recorded in the
+	// checkpoint image, not this field.
+	CpuFeatures   []string `protobuf:"bytes,18,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RestoreWorkloadRequest) Reset() {
@@ -1497,6 +1518,13 @@ func (x *RestoreWorkloadRequest) GetPreserveRestoreDir() bool {
 		return x.PreserveRestoreDir
 	}
 	return false
+}
+
+func (x *RestoreWorkloadRequest) GetCpuFeatures() []string {
+	if x != nil {
+		return x.CpuFeatures
+	}
+	return nil
 }
 
 type RestoreWorkloadResponse struct {
@@ -1915,7 +1943,7 @@ const file_ateom_proto_rawDesc = "" +
 	"\x04spec\x18\a \x01(\v2\x13.ateom.WorkloadSpecR\x04spec\x12/\n" +
 	"\n" +
 	"actor_dirs\x18\b \x01(\v2\x10.ateom.ActorDirsR\tactorDirs\"\x1b\n" +
-	"\x19TerminateWorkloadResponse\"\x8a\x05\n" +
+	"\x19TerminateWorkloadResponse\"\xad\x05\n" +
 	"\x12RunWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -1932,7 +1960,8 @@ const file_ateom_proto_rawDesc = "" +
 	"\tcpu_milli\x18\v \x01(\x03R\bcpuMilli\x12!\n" +
 	"\fmemory_bytes\x18\f \x01(\x03R\vmemoryBytes\x12/\n" +
 	"\n" +
-	"actor_dirs\x18\r \x01(\v2\x10.ateom.ActorDirsR\tactorDirs\x1aD\n" +
+	"actor_dirs\x18\r \x01(\v2\x10.ateom.ActorDirsR\tactorDirs\x12!\n" +
+	"\fcpu_features\x18\x0e \x03(\tR\vcpuFeatures\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
@@ -1998,7 +2027,7 @@ const file_ateom_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"s\n" +
 	"\x1aCheckpointWorkloadResponse\x12%\n" +
 	"\x0esnapshot_files\x18\x01 \x03(\tR\rsnapshotFiles\x12.\n" +
-	"\x13data_snapshot_files\x18\x02 \x03(\tR\x11dataSnapshotFiles\"\x93\x06\n" +
+	"\x13data_snapshot_files\x18\x02 \x03(\tR\x11dataSnapshotFiles\"\xb6\x06\n" +
 	"\x16RestoreWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -2018,7 +2047,8 @@ const file_ateom_proto_rawDesc = "" +
 	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x12/\n" +
 	"\n" +
 	"actor_dirs\x18\x10 \x01(\v2\x10.ateom.ActorDirsR\tactorDirs\x120\n" +
-	"\x14preserve_restore_dir\x18\x11 \x01(\bR\x12preserveRestoreDir\x1aD\n" +
+	"\x14preserve_restore_dir\x18\x11 \x01(\bR\x12preserveRestoreDir\x12!\n" +
+	"\fcpu_features\x18\x12 \x03(\tR\vcpuFeatures\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
