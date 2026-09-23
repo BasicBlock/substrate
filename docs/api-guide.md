@@ -399,6 +399,7 @@ This means a single, cluster-managed config pins the sandbox runtime version for
 | `sandboxClass` | `string` | **Required.** Runtime family this config applies to: `gvisor` (default) or `microvm`. An `ActorTemplate` only uses `SandboxConfig`s whose `sandboxClass` matches its own. |
 | `pauseImage` | `string` | **Required.** The image for the sandbox's root container (e.g. `registry.k8s.io/pause`, or `gcr.io/gke-release/pause` on GKE). Must include a digest (`...@sha256:...`) — it is recorded in each snapshot's manifest so a restore rebuilds the sandbox from the same image. |
 | `assets` | `map[arch]map[name]AssetFile` | Optional. Content-addressed files atelet fetches, keyed by architecture (`amd64`, `arm64`) then asset name. gVisor expects a `gvisor` asset (the release's `gvisor.tar.zstd`), which atelet auto-extracts. A micro-VM backend expects several. Each `AssetFile` is a `{ url, sha256 }` pair. |
+| `cpuFeatures` | `[]string` | Optional. gVisor-only, x86_64 (amd64) only. Levels a gVisor sandbox's guest CPUID to host-features ∩ this list at boot, so a snapshot taken afterwards restores on any worker whose CPU is a superset — see [CPU Feature Leveling](#cpu-feature-leveling-cross-cpu-model-snapshots) below. Rejected on a `microvm` config, or on a `gvisor` config that also declares `arm64` assets. |
 
 A cluster-wide gVisor `SandboxConfig` (`gvisor-default`) is installed with the platform, so gVisor templates can name it via `sandboxConfig.configName` without any extra setup.
 
@@ -428,6 +429,42 @@ spec:
 A `microvm` `SandboxConfig` supplies the [Kata Containers](https://katacontainers.io/) + [Cloud Hypervisor](https://www.cloudhypervisor.org/) toolchain instead of `runsc`. Each architecture must define the full asset set — `cloud-hypervisor`, `virtiofsd`, `kata-kernel`, and `kata-image` — which a `ValidatingAdmissionPolicy` enforces at apply time. Worker pods for a micro-VM pool require `/dev/kvm` and nested-virtualization-capable nodes. The controller requests those devices on the pod automatically, and atelet advertises them only where they exist, so placement follows the hardware rather than a node label. Clusters that reserve nested-virt nodes with an `ate.dev/sandboxClass=microvm` taint are still tolerated: advertising a device attracts these pods to capable nodes but repels nothing else from them.
 
 See [`hack/microvm-assets/`](../hack/microvm-assets/) for scripts that assemble and stage these assets, plus a worked counter demo (`demos/counter/counter-microvm.yaml.tmpl`) that suspends and resumes an in-RAM counter across worker pods.
+
+### CPU Feature Leveling (Cross-CPU-Model Snapshots)
+
+gVisor records the guest CPU feature set in every checkpoint and refuses to restore on a host missing any of them (`CheckHostCompatible`). Because Substrate never told `runsc` which features to expose, a snapshot was pinned to the exact CPU model of the worker that took it, forcing every `WorkerPool` to run one CPU model — see [agent-substrate/substrate#1657](https://github.com/agent-substrate/substrate/issues/1657).
+
+Setting `spec.cpuFeatures` on a `gvisor` `SandboxConfig` fixes this: at sandbox boot, `runsc` levels the guest CPUID to the intersection of the host's features and this list (via its `dev.gvisor.internal.cpufeatures` OCI annotation), and a checkpoint taken afterwards records that levelled set instead of the raw host CPU. A restore can then land on any worker whose CPU is a superset of the levelled set, so a `WorkerPool` can mix CPU generations.
+
+To compute the value, run `runsc cpu-features` on every node model a pool running this config may schedule onto, and intersect the printed feature names — the result is the widest set every node in the pool actually has.
+
+```yaml
+apiVersion: ate.dev/v1alpha1
+kind: SandboxConfig
+metadata:
+  name: gvisor-leveled
+spec:
+  sandboxClass: gvisor
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  assets:
+    amd64:
+      gvisor:
+        url: "gs://gvisor/releases/nightly/2026-09-02/x86_64/gvisor.tar.zstd"
+        sha256: "d547d81401461fd1c679c5c4fa0a6c2b8ef7dc3c22ce23c9e25dcc4c69cfd06f"
+  # The intersection of `runsc cpu-features` across every node model this
+  # config's pools may schedule onto (e.g. m7a.2xlarge and c5ad.xlarge).
+  cpuFeatures:
+    - avx2
+    - avx
+    - fma
+    - fsgsbase
+```
+
+Notes and limits:
+
+- **x86_64 (amd64) only.** gVisor's `FeatureSet.Intersect` is not supported on ARM64, so a `SandboxConfig` that declares `arm64` assets must leave `cpuFeatures` empty; a `ValidatingAdmissionPolicy` rejects the combination, and it is rejected on a `microvm` config outright.
+- **Only affects new sandboxes.** `runsc` only consults the annotation at initial sandbox boot. An existing snapshot keeps whatever raw feature set it was checkpointed with; restoring it is governed entirely by that recorded set, not by the current `cpuFeatures` value. Set the field before taking new snapshots; old ones are unaffected either way.
+- **Leave it empty** (the default) to keep today's behavior of exposing the raw host feature set — the config is still restricted to a single CPU model per pool.
 
 ---
 
