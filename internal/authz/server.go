@@ -55,8 +55,11 @@ type Server struct {
 	closeOnce sync.Once
 	fgaServer *server.Server
 	datastore storage.OpenFGADatastore
-	storeID   string
-	modelID   string
+	// pool serializes binding reconciliation across replicas; the datastore
+	// owns and closes it.
+	pool    *pgxpool.Pool
+	storeID string
+	modelID string
 }
 
 // NewServer initializes OpenFGA database migrations on pool, constructs the
@@ -117,6 +120,7 @@ func NewServer(ctx context.Context, pool *pgxpool.Pool) (*Server, error) {
 	return &Server{
 		fgaServer: fgaServer,
 		datastore: datastore,
+		pool:      pool,
 		storeID:   storeID,
 		modelID:   modelID,
 	}, nil

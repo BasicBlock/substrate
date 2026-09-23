@@ -51,6 +51,26 @@ tuples:
     relation: host_node
     object: worker:pod-2
 
+  # Groups and creators
+  - user: group:developers#member
+    relation: atespace_creator
+    object: global:root
+  - user: group:developers#member
+    relation: viewer
+    object: atespace:templates
+  - user: global:root
+    relation: parent_global
+    object: atespace:templates
+  - user: user:grace
+    relation: member
+    object: group:developers
+  - user: user:grace
+    relation: creator
+    object: atespace:grace-space
+  - user: global:root
+    relation: parent_global
+    object: atespace:grace-space
+
   # Actor Instance (actor:runner-1 in atespace:space-1 scheduled on worker:pod-1)
   - user: atespace:space-1
     relation: parent_atespace
@@ -261,3 +281,31 @@ tests:
         object: actor:runner-1
         assertions:
           can_mint_ateom_actor_credential: false
+
+  - name: 6. Groups and Creators
+    check:
+      - user: user:grace # Group member may create atespaces
+        object: global:root
+        assertions:
+          can_create_atespace: true
+          owner: false
+      - user: user:eve # Non-member may not
+        object: global:root
+        assertions:
+          can_create_atespace: false
+      - user: user:grace # Creator owns the atespace
+        object: atespace:grace-space
+        assertions:
+          owner: true
+          can_create_actor: true
+          can_delete: true
+      - user: user:alice # Another atespace's owner does not
+        object: atespace:grace-space
+        assertions:
+          owner: false
+          can_get: false
+      - user: user:grace # Group viewer reads but cannot write
+        object: atespace:templates
+        assertions:
+          can_get: true
+          can_create_actor: false

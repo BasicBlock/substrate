@@ -1,0 +1,43 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# The example in docs/authorization.md, with the providers of
+# testdata/authentication.yaml.
+mode: enforce
+global:
+  owners:
+  # Platform admins.
+  - google:paul@basicblock.io
+  # Operators' kubectl-ate (a TokenRequest for ate-system/ate-client).
+  - kubernetes:system:serviceaccount:ate-system:ate-client
+  # Substrate's own components, by their pod identity certificates.
+  - mtls:spiffe://cluster.local/ns/ate-system/sa/ate-controller
+  - mtls:spiffe://cluster.local/ns/ate-system/sa/atenet-router
+  - mtls:spiffe://cluster.local/ns/ate-system/sa/atenet-egress
+  - mtls:spiffe://cluster.local/ns/ate-system/sa/atelet
+  atespaceCreators:
+  # Any basicblock.io developer, each owning the atespaces they create.
+  - group:google/basicblock
+  # An agent runtime's Google service account.
+  - google:eve-runtime@basicblock-internal.iam.gserviceaccount.com
+atespaces:
+  # Developers create workspaces from these templates in their own atespaces.
+  bb-dev:
+    viewers:
+    - group:google/basicblock
+  # The eve runtime's Kubernetes service account drives actors here only.
+  eve-demo:
+    editors:
+    - kubernetes:system:serviceaccount:internal-eve-demo:eve-demo

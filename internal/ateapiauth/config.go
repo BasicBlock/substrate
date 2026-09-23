@@ -91,6 +91,20 @@ func (v *ClaimValue) UnmarshalJSON(b []byte) error {
 	return fmt.Errorf("claim value must be a string, boolean or number, got %s", b)
 }
 
+// GroupNames returns the JWT provider names and the "<provider>/<rule>" names
+// of their named claim rules, which authorization bindings may use.
+func (c *AuthenticationConfig) GroupNames() (providers, ruleGroups []string) {
+	for _, p := range c.JWTProviders {
+		providers = append(providers, p.Name)
+		for _, rule := range p.ClaimRules {
+			if rule.Name != "" {
+				ruleGroups = append(ruleGroups, p.Name+"/"+rule.Name)
+			}
+		}
+	}
+	return providers, ruleGroups
+}
+
 // Principal returns the principal a verified token's claims identify and the
 // names of the claim rules it satisfies. It fails when the principal claim is
 // missing or empty, or when claim rules are configured and none admits the
