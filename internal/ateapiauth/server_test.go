@@ -20,6 +20,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/url"
+	"reflect"
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/principal"
@@ -37,7 +38,7 @@ const (
 )
 
 func TestValidateServerConfig(t *testing.T) {
-	validProvider := JWTProvider{Name: "test", Issuer: "https://issuer.example", Verify: func(context.Context, string) (string, error) { return "", nil }}
+	validProvider := JWTProvider{Name: "test", Issuer: "https://issuer.example", Verify: func(context.Context, string) (string, []string, error) { return "", nil, nil }}
 	tests := []struct {
 		name    string
 		cfg     ServerConfig
@@ -72,11 +73,11 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 	withBearer := func(ctx context.Context, token string) context.Context {
 		return metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
 	}
-	verifyGoodToken := func(_ context.Context, bearer string) (string, error) {
+	verifyGoodToken := func(_ context.Context, bearer string) (string, []string, error) {
 		if bearer != testGoodToken {
-			return "", fmt.Errorf("bad token")
+			return "", nil, fmt.Errorf("bad token")
 		}
-		return subject, nil
+		return subject, []string{"service-accounts"}, nil
 	}
 
 	tests := []struct {
@@ -84,7 +85,7 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 		ctx  context.Context
 		// verify is the bearer token verifier; nil means the test fails if
 		// it is called (the certificate identity must take precedence).
-		verify   func(context.Context, string) (string, error)
+		verify   func(context.Context, string) (string, []string, error)
 		want     principal.PrincipalInfo
 		wantCode codes.Code
 	}{
@@ -104,7 +105,7 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 			name:     "no peer with valid bearer",
 			ctx:      withBearer(context.Background(), testGoodToken),
 			verify:   verifyGoodToken,
-			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer},
+			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer, Provider: "test", Groups: []string{"authenticated", "test", "test/service-accounts"}},
 			wantCode: codes.OK,
 		},
 		{
@@ -121,19 +122,19 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 				}},
 			}), testGoodToken),
 			verify:   verifyGoodToken,
-			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer},
+			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer, Provider: "test", Groups: []string{"authenticated", "test", "test/service-accounts"}},
 			wantCode: codes.OK,
 		},
 		{
 			name:     "certificate with SPIFFE URI SAN",
 			ctx:      spiffePeer(context.Background()),
-			want:     principal.PrincipalInfo{ID: spiffeID.String(), Kind: principal.KindMTLS},
+			want:     principal.PrincipalInfo{ID: spiffeID.String(), Kind: principal.KindMTLS, Provider: principal.ProviderMTLS, Groups: []string{"authenticated", "mtls"}},
 			wantCode: codes.OK,
 		},
 		{
 			name:     "certificate takes precedence over bearer",
 			ctx:      withBearer(spiffePeer(context.Background()), testGoodToken),
-			want:     principal.PrincipalInfo{ID: spiffeID.String(), Kind: principal.KindMTLS},
+			want:     principal.PrincipalInfo{ID: spiffeID.String(), Kind: principal.KindMTLS, Provider: principal.ProviderMTLS, Groups: []string{"authenticated", "mtls"}},
 			wantCode: codes.OK,
 		},
 	}
@@ -142,9 +143,9 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			verify := tt.verify
 			if verify == nil {
-				verify = func(context.Context, string) (string, error) {
+				verify = func(context.Context, string) (string, []string, error) {
 					t.Fatal("bearer token verifier called; certificate identity must take precedence")
-					return "", nil
+					return "", nil, nil
 				}
 			}
 			auth := newChainedAuthenticator(ServerConfig{JWTProviders: []JWTProvider{{Name: "test", Issuer: issuer, Verify: verify}}})
@@ -159,7 +160,7 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 			if !ok {
 				t.Fatal("no principal in context")
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("principal=%+v want %+v", got, tt.want)
 			}
 		})
@@ -168,8 +169,8 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 
 func TestJWTServerAuthenticatorRequiresBearer(t *testing.T) {
 	auth := jwtServerAuthenticator{
-		providers: []JWTProvider{{Name: "test", Issuer: "https://issuer.example", Verify: func(context.Context, string) (string, error) {
-			return "", fmt.Errorf("bad token")
+		providers: []JWTProvider{{Name: "test", Issuer: "https://issuer.example", Verify: func(context.Context, string) (string, []string, error) {
+			return "", nil, fmt.Errorf("bad token")
 		}}},
 	}
 
@@ -197,8 +198,8 @@ func TestJWTServerAuthenticatorInjectsPrincipal(t *testing.T) {
 	const subject = "system:serviceaccount:default:router"
 	const issuer = "https://issuer.example"
 	auth := jwtServerAuthenticator{
-		providers: []JWTProvider{{Name: "test", Issuer: issuer, Verify: func(context.Context, string) (string, error) {
-			return subject, nil
+		providers: []JWTProvider{{Name: "test", Issuer: issuer, Verify: func(context.Context, string) (string, []string, error) {
+			return subject, nil, nil
 		}}},
 	}
 
@@ -211,19 +212,19 @@ func TestJWTServerAuthenticatorInjectsPrincipal(t *testing.T) {
 	if !ok {
 		t.Fatal("no principal in context")
 	}
-	want := principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer}
-	if got != want {
+	want := principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer, Provider: "test", Groups: []string{"authenticated", "test"}}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("principal=%+v want %+v", got, want)
 	}
 }
 
 func TestJWTServerAuthenticatorTriesProviders(t *testing.T) {
 	auth := jwtServerAuthenticator{providers: []JWTProvider{
-		{Name: "first", Issuer: "https://first.example", Verify: func(context.Context, string) (string, error) {
-			return "", fmt.Errorf("wrong issuer")
+		{Name: "first", Issuer: "https://first.example", Verify: func(context.Context, string) (string, []string, error) {
+			return "", nil, fmt.Errorf("wrong issuer")
 		}},
-		{Name: "second", Issuer: "https://second.example", Verify: func(context.Context, string) (string, error) {
-			return "subject", nil
+		{Name: "second", Issuer: "https://second.example", Verify: func(context.Context, string) (string, []string, error) {
+			return "subject", nil, nil
 		}},
 	}}
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer e30.eyJpc3MiOiJodHRwczovL3NlY29uZC5leGFtcGxlIn0.eA"))
@@ -232,8 +233,8 @@ func TestJWTServerAuthenticatorTriesProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := principal.FromContext(ctx)
-	want := principal.PrincipalInfo{ID: "subject", Kind: principal.KindJWT, Issuer: "https://second.example"}
-	if got != want {
+	want := principal.PrincipalInfo{ID: "subject", Kind: principal.KindJWT, Issuer: "https://second.example", Provider: "second", Groups: []string{"authenticated", "second"}}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("principal = %+v, want %+v", got, want)
 	}
 }

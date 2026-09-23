@@ -16,6 +16,7 @@
 package oidcjwt
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -94,6 +95,10 @@ type Claims struct {
 	JTI        string
 
 	KubernetesClaims
+
+	// Raw holds every top-level claim of the verified payload, with numbers as
+	// json.Number, for rules over issuer-specific claims such as "email".
+	Raw map[string]any
 }
 
 // KubernetesClaims contains claims added to Kubernetes ServiceAccount tokens.
@@ -246,6 +251,13 @@ func (v *Verifier) Verify(ctx context.Context, jwt string, now time.Time) (*Clai
 		return nil, fmt.Errorf("jwt claims to have been issued in the future")
 	}
 
+	raw := map[string]any{}
+	decoder := json.NewDecoder(bytes.NewReader(payloadBytes))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("while decoding payload claims: %w", err)
+	}
+
 	return &Claims{
 		Issuer:     rawClaims.Issuer,
 		Audiences:  audiences,
@@ -266,6 +278,7 @@ func (v *Verifier) Verify(ctx context.Context, jwt string, now time.Time) (*Clai
 			NodeUID:            rawClaims.BoundClaims.Node.UID,
 			WarnAfter:          time.Unix(int64(rawClaims.BoundClaims.WarnAfter), 0),
 		},
+		Raw: raw,
 	}, nil
 }
 

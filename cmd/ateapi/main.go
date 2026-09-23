@@ -515,12 +515,12 @@ func buildJWTProviders(ctx context.Context, cfg *ateapiauth.AuthenticationConfig
 		serverCfg.JWTProviders = append(serverCfg.JWTProviders, ateapiauth.JWTProvider{
 			Name:   providerCfg.Name,
 			Issuer: providerCfg.Issuer,
-			Verify: func(ctx context.Context, bearer string) (string, error) {
+			Verify: func(ctx context.Context, bearer string) (string, []string, error) {
 				claims, err := verifier.Verify(ctx, bearer, time.Now())
 				if err != nil {
-					return "", err
+					return "", nil, err
 				}
-				return claims.Subject, nil
+				return providerCfg.Principal(claims.Raw)
 			},
 		})
 		if providerCfg.Name == cfg.ActorIdentityJWTProvider {
