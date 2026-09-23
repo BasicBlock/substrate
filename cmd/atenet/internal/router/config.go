@@ -177,6 +177,10 @@ type routerConfig struct {
 	// Ingress-only: egress never resumes an actor.
 	ParkedRequest ingress.ParkedRequestConfig
 
+	// IngressAccess authorizes ingress clients through ate-api's
+	// CheckActorAccess before their actor is resumed. Ingress-only.
+	IngressAccess ingress.AccessConfig
+
 	// ExtProcMaxRequests is the circuit-breaker max_requests Envoy applies to
 	// the ext_proc cluster. Every parked request holds one slot for its entire
 	// wait, so this must be >= ParkedRequest.Max (validated at startup); the
@@ -260,6 +264,9 @@ func (c routerConfig) validate() error {
 	}
 	if err := c.ParkedRequest.Validate(); err != nil {
 		return err
+	}
+	if err := c.IngressAccess.Validate(); err != nil {
+		return fmt.Errorf("--ingress-authorization: %w", err)
 	}
 
 	if c.ExtProcMaxRequests < 0 {

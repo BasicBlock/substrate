@@ -17,8 +17,9 @@
 // through the control plane (parking the request while the worker pool is
 // saturated), and points the dataplane at the worker that ends up hosting it.
 //
-// Everything reaching this handler is unauthenticated client input. The
-// opposite trust model — an actor identity carried by a CA-signed client
+// Everything reaching this handler is unauthenticated client input; with
+// WithAccess, the client's token is checked by ate-api (CheckActorAccess)
+// before anything else happens. The opposite trust model — an actor identity carried by a CA-signed client
 // certificate — belongs to the sibling egress package, and the two are kept
 // apart deliberately.
 package ingress
@@ -61,14 +62,29 @@ const (
 type Handler struct {
 	resumer *ActorResumer
 	parking *parkingLot
+	access  *accessControl
 }
 
-func New(apiClient ateapipb.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics) *Handler {
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithAccess authorizes each request's client through ate-api before the
+// actor is resumed, and removes client credentials before it is forwarded.
+func WithAccess(cfg AccessConfig, checker AccessChecker) Option {
+	return func(h *Handler) { h.access = newAccessControl(cfg, checker) }
+}
+
+func New(apiClient ateapipb.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics, opts ...Option) *Handler {
 	lot := newParkingLot(parkCfg, parkMetrics)
-	return &Handler{
+	h := &Handler{
 		resumer: NewActorResumer(apiClient, withParking(parkCfg), withParkingLot(lot)),
 		parking: lot,
+		access:  newAccessControl(AccessConfig{}, nil),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 func (h *Handler) Direction() extproc.Direction { return extproc.DirectionIngress }
@@ -104,6 +120,12 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		if p, ok := atunnel.ParsePort(portStr); ok {
 			targetPort = p
 		}
+	}
+
+	// Authorize before resuming: a resume is a side effect a client without
+	// access must not cause.
+	if err := h.access.authorize(ctx, md, actorRef); err != nil {
+		return extproc.Result{}, err
 	}
 
 	slog.InfoContext(ctx, "ResumeActor", slog.Any("actor", actorRef))
@@ -160,6 +182,8 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		},
 		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 	})
+	// The actor could replay a client's credential.
+	mutation.RemoveHeaders = h.access.removedHeaders()
 
 	res.Target = targetAddr
 	res.Response = &extprocv3.HeadersResponse{
