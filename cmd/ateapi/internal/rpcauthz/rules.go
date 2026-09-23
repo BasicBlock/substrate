@@ -100,7 +100,10 @@ var rules = map[string]rule{
 	ateapipb.Control_PauseActor_FullMethodName:  onActor[*ateapipb.PauseActorRequest]("can_suspend"),
 	ateapipb.Control_ResumeActor_FullMethodName: onActor[*ateapipb.ResumeActorRequest]("can_resume"),
 	ateapipb.Control_RevertActor_FullMethodName: onActor[*ateapipb.RevertActorRequest]("can_revert"),
-	ateapipb.Control_DeleteActor_FullMethodName: onActor[*ateapipb.DeleteActorRequest]("can_delete"),
+	// The ingress gateway asks on its clients' behalf; the answer checks the
+	// client's can_connect, and would otherwise reveal whether a token is valid.
+	ateapipb.Control_CheckActorAccess_FullMethodName: global("owner"),
+	ateapipb.Control_DeleteActor_FullMethodName:      onActor[*ateapipb.DeleteActorRequest]("can_delete"),
 
 	ateapipb.Control_GetActorEgressPolicy_FullMethodName:    onActor[*ateapipb.GetActorEgressPolicyRequest]("can_get"),
 	ateapipb.Control_CreateActorEgressPolicy_FullMethodName: onActor[*ateapipb.CreateActorEgressPolicyRequest]("can_update"),

@@ -232,6 +232,7 @@ tests:
           can_update: true
           can_delete: true
           can_resume: true
+          can_connect: true
           can_suspend: true
           can_revert: true
       - user: user:bob # Editor
@@ -241,6 +242,7 @@ tests:
           can_update: true
           can_delete: true
           can_resume: true
+          can_connect: true
           can_suspend: true
           can_revert: true
       - user: user:dave # Viewer
@@ -250,6 +252,7 @@ tests:
           can_update: false
           can_delete: false
           can_resume: false
+          can_connect: false
           can_suspend: false
           can_revert: false
       - user: user:frank # Cluster Viewer
@@ -259,12 +262,14 @@ tests:
           can_update: false
           can_delete: false
           can_resume: false
+          can_connect: false
           can_suspend: false
           can_revert: false
       - user: user:sa-router # Ingress router proxy
         object: actor:runner-1
         assertions:
           can_resume: true
+          can_connect: false
       - user: user:sa-runner-1 # Workload identity can suspend and revert
         object: actor:runner-1
         assertions:

@@ -510,3 +510,29 @@ func TestEllipticCurveForJWK(t *testing.T) {
 		t.Error("ellipticCurveForJWK(P-192) = nil, want error")
 	}
 }
+
+// TestVerifierWithJWKS covers an issuer without a discovery document, such as
+// Identity-Aware Proxy, whose ES256 keys are published at a fixed URL.
+func TestVerifierWithJWKS(t *testing.T) {
+	ti := newTestIssuer(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ti.addEC(t, "iap-1", "P-256", &key.PublicKey)
+	verifier := NewVerifierWithJWKS(ti.issuer(), []string{testAudience}, ti.server.URL+"/jwks", ti.server.Client())
+	token := mintJWT(t, "ES256", "iap-1", key, validClaims(ti.issuer()))
+	if _, err := verifier.Verify(t.Context(), token, time.Now()); err != nil {
+		t.Fatalf("Verify() = %v", err)
+	}
+	if got := ti.discoveryRequests.Load(); got != 0 {
+		t.Fatalf("discovery requests = %d, want 0", got)
+	}
+	if got := ti.jwksRequests.Load(); got != 1 {
+		t.Fatalf("JWKS requests = %d, want 1", got)
+	}
+	other := newTestIssuer(t)
+	if _, err := NewVerifierWithJWKS(other.issuer(), []string{testAudience}, ti.server.URL+"/jwks", ti.server.Client()).Verify(t.Context(), token, time.Now()); err == nil {
+		t.Fatal("Verify() accepted a token from another issuer")
+	}
+}
