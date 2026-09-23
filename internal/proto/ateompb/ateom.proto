@@ -145,6 +145,12 @@ message RunWorkloadRequest {
   // runtime default (unlimited for gVisor, ateom's own default for the micro-VM).
   int64 cpu_milli = 11;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 12; // Memory limit in bytes.
+
+  // cpu_features, when non-empty, levels the gVisor sandbox's guest CPUID to
+  // the intersection of the host's CPU features and this list, via runsc's
+  // dev.gvisor.internal.cpufeatures OCI annotation (ignored by the micro-VM
+  // runtime). Empty keeps the raw host feature set. x86_64 (amd64) only.
+  repeated string cpu_features = 13;
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -326,6 +332,16 @@ message RestoreWorkloadRequest {
   // these are ignored. Zero means "unset": keep the runtime default.
   int64 cpu_milli = 14;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 15; // Memory limit in bytes.
+
+  // cpu_features, when non-empty, levels the gVisor sandbox's guest CPUID to
+  // the intersection of the host's CPU features and this list, via runsc's
+  // dev.gvisor.internal.cpufeatures OCI annotation (ignored by the micro-VM
+  // runtime). Empty keeps the raw host feature set. x86_64 (amd64) only.
+  // Reapplied on restore for consistency with the create path; gVisor itself
+  // only consults the annotation at initial sandbox boot -- what a restore
+  // actually requires of the host is the feature set already recorded in the
+  // checkpoint image, not this field.
+  repeated string cpu_features = 16;
 }
 
 message RestoreWorkloadResponse {
