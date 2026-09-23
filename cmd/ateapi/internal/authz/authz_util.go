@@ -43,14 +43,20 @@ const (
 	RoleEditor = "editor"
 	RoleViewer = "viewer"
 
-	RelationCanCreateAtespace     = "can_create_atespace"
-	RelationCanListAtespaces      = "can_list_atespaces"
-	RelationCanGet                = "can_get"
-	RelationCanDelete             = "can_delete"
-	RelationCanCreateAccessPolicy = "can_create_access_policy"
-	RelationCanGetAccessPolicy    = "can_get_access_policy"
-	RelationCanUpdateAccessPolicy = "can_update_access_policy"
-	RelationCanDeleteAccessPolicy = "can_delete_access_policy"
+	RelationCanCreateAtespace      = "can_create_atespace"
+	RelationCanListAtespaces       = "can_list_atespaces"
+	RelationCanGet                 = "can_get"
+	RelationCanUpdate              = "can_update"
+	RelationCanDelete              = "can_delete"
+	RelationCanCreateAccessPolicy  = "can_create_access_policy"
+	RelationCanGetAccessPolicy     = "can_get_access_policy"
+	RelationCanUpdateAccessPolicy  = "can_update_access_policy"
+	RelationCanDeleteAccessPolicy  = "can_delete_access_policy"
+	RelationCanCreateActor         = "can_create_actor"
+	RelationCanCreateActorTemplate = "can_create_actor_template"
+	RelationCanSuspend             = "can_suspend"
+	RelationCanResume              = "can_resume"
+	RelationCanRevert              = "can_revert"
 
 	// maxTuplesPerWrite is OpenFGA's default maximum number of tuples allowed in a single Write request.
 	maxTuplesPerWrite = 100
@@ -82,6 +88,24 @@ func AtespaceObject(name string) string {
 	return "atespace:" + tupleReplacer.Replace(name)
 }
 
+// ActorObject formats an actor as an OpenFGA object string, scoped to its
+// atespace ("actor:<atespace>/<name>"). contextualTuples recovers the
+// atespace from this exact format to place the actor under it.
+func ActorObject(atespace, name string) string {
+	return "actor:" + tupleReplacer.Replace(atespace) + "/" + tupleReplacer.Replace(name)
+}
+
+// ActorTemplateObject formats an actor template as an OpenFGA object string,
+// scoped to its atespace ("actor_template:<atespace>/<name>").
+func ActorTemplateObject(atespace, name string) string {
+	return "actor_template:" + tupleReplacer.Replace(atespace) + "/" + tupleReplacer.Replace(name)
+}
+
+// GroupObject formats a group name as an OpenFGA object string.
+func GroupObject(name string) string {
+	return "group:" + tupleReplacer.Replace(name)
+}
+
 // formatUser formats a principal ID as a valid OpenFGA user string.
 // OpenFGA disallows ':', '#', whitespace, and treats '*' as a public wildcard;
 // these characters (plus '%') are percent-encoded to prevent collisions and
@@ -90,13 +114,24 @@ func formatUser(id string) string {
 	return "user:" + tupleReplacer.Replace(id)
 }
 
-// FormatMember validates a policy member string (such as "user:alice@example.com")
-// and returns the percent-encoded OpenFGA user string. Control characters are
-// rejected because OpenFGA does not accept them in tuple user IDs.
+// FormatMember validates a policy member string — "user:<id>" or
+// "group:<name>" (a JWT provider name or "<provider>/<claim-rule>", matching
+// a principal's Groups) — and returns its percent-encoded OpenFGA form, ready
+// to bind a role to. Control characters are rejected because OpenFGA does not
+// accept them in tuple user IDs.
 func FormatMember(member string) (string, error) {
+	if name, ok := strings.CutPrefix(member, "group:"); ok {
+		if strings.TrimSpace(name) == "" {
+			return "", fmt.Errorf("member %q must have non-empty \"group:<name>\" format", member)
+		}
+		if strings.ContainsFunc(name, unicode.IsControl) {
+			return "", fmt.Errorf("member %q must not contain control characters", member)
+		}
+		return GroupObject(name) + "#member", nil
+	}
 	id, ok := strings.CutPrefix(member, "user:")
 	if !ok || strings.TrimSpace(id) == "" {
-		return "", fmt.Errorf("member %q must have non-empty \"user:<id>\" format", member)
+		return "", fmt.Errorf("member %q must have non-empty \"user:<id>\" or \"group:<name>\" format", member)
 	}
 	if id == "*" {
 		return "", fmt.Errorf("wildcard member %q is not allowed", member)
@@ -178,6 +213,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, fgaServer *server.Server, boot
 		fgaServer:       fgaServer,
 		storeID:         storeID,
 		modelID:         modelID,
+		pool:            pool,
 		bootstrapOwners: owners,
 	}
 	policyManager := &PolicyManager{

@@ -75,6 +75,7 @@ var (
 	grpcServerCredBundle = pflag.String("grpc-server-cred-bundle", "", "File with the server TLS credential bundle.")
 
 	authenticationConfigFile          = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
+	authorizationConfigFile           = pflag.String("authorization-config", "", "YAML file with the authorization mode and role bindings (docs/authorization.md). When set, it selects audit or enforce mode for every RPC but the AccessPolicy RPCs, which --experimental-enable-authz already always checks, and takes precedence over that flag.")
 	postgresReadWriteConnectionString = pflag.String("postgres-read-write-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
 	postgresOwnerConnectionString     = pflag.String("postgres-owner-connection-string", "", "PostgreSQL owner connection string (libpq DSN or URI).")
 	postgresReadWriteRole             = pflag.String("postgres-read-write-role", "", "Required PostgreSQL role assumed by read/write connections.")
@@ -201,6 +202,22 @@ func main() {
 	}
 	persistence.SetPolicyManager(policyManager)
 
+	var authzMode authz.Mode
+	if *authorizationConfigFile != "" {
+		authzConfig, err := authz.LoadConfig(*authorizationConfigFile)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to load authorization config", err)
+		}
+		if err := authzConfig.Validate(authenticationConfig.GroupNames()); err != nil {
+			serverboot.Fatal(ctx, "Invalid authorization config", err)
+		}
+		if err := authorizer.ReconcileConfig(shutdownCtx, authzConfig); err != nil {
+			serverboot.Fatal(ctx, "Failed to reconcile authorization bindings", err)
+		}
+		authzMode = authzConfig.Mode
+		slog.InfoContext(ctx, "Authorization enabled from --authorization-config", slog.String("mode", string(authzMode)))
+	}
+
 	clientset, ateClient, err := newKubeClients()
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to create Kubernetes clients", err)
@@ -311,11 +328,15 @@ func main() {
 		serverboot.Fatal(ctx, "Invalid auth config", err)
 	}
 
+	authzInterceptor := authz.UnaryServerInterceptor(authorizer, *experimentalEnableAuthz)
+	if authzMode != "" {
+		authzInterceptor = authz.UnaryServerInterceptorForMode(authorizer, authzMode)
+	}
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		apiauthn.UnaryServerInterceptor(authCfg),
 		ateinterceptors.MaxDeadlineUnaryInterceptor(maxRPCDeadline),
 		ateinterceptors.ServerUnaryInterceptor,
-		authz.UnaryServerInterceptor(authorizer, *experimentalEnableAuthz),
+		authzInterceptor,
 		ateinterceptors.RejectUnknownFieldsUnaryInterceptor,
 	}
 
@@ -419,6 +440,7 @@ func logFlagValues(ctx context.Context) {
 		slog.String("grpc-listen-addr", *listenAddr),
 		slog.String("grpc-server-cred-bundle", *grpcServerCredBundle),
 		slog.String("authentication-config", *authenticationConfigFile),
+		slog.String("authorization-config", *authorizationConfigFile),
 		postgresConnectionAttr("postgres-read-write-connection-string", *postgresReadWriteConnectionString),
 		postgresConnectionAttr("postgres-owner-connection-string", *postgresOwnerConnectionString),
 		slog.String("postgres-read-write-role", *postgresReadWriteRole),

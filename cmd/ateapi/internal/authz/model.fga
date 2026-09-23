@@ -22,6 +22,14 @@ model
 # Unified Principal Identity (human users, machine service accounts, SPIFFE workload identities)
 type user
 
+# A set of principals: everyone authenticated, everyone one provider
+# authenticated, or everyone one of its claim rules admitted. ate-api supplies a
+# caller's memberships with each check instead of storing them, so role
+# bindings can name principals that have never called.
+type group
+  relations
+    define member: [user]
+
 # Physical host node running atelet
 type node
 
@@ -33,10 +41,12 @@ type worker
 # Global Scope (singleton: there will only ever be one instance, e.g. 'global:root')
 type global
   relations
-    define owner: [user]
-    define viewer: [user] or owner
+    define owner: [user, group#member]
+    define viewer: [user, group#member] or owner
 
-    define can_create_atespace: owner
+    # May create atespaces, becoming each new atespace's creator.
+    define atespace_creator: [user, group#member]
+    define can_create_atespace: owner or atespace_creator
     define can_list_atespaces: viewer
     define can_get: viewer
 
@@ -49,11 +59,17 @@ type atespace
   relations
     define parent_global: [global]
 
+    # The principal that created the atespace, making it an owner without an
+    # explicit binding. Nothing currently writes this tuple (no handler calls
+    # RecordCreator), so it is inert until one does; role bindings written
+    # through the AccessPolicy RPCs are unaffected.
+    define creator: [user]
+
     # --- 1. Aligned 3-Tier Roles ---
     # Global owner automatically inherits owner without explicit per-atespace tuples
-    define owner: [user] or owner from parent_global
-    define editor: [user] or owner
-    define viewer: [user] or editor or viewer from parent_global
+    define owner: [user, group#member] or creator or owner from parent_global
+    define editor: [user, group#member] or owner
+    define viewer: [user, group#member] or editor or viewer from parent_global
 
     # --- 2. Policy Governance ---
     define can_create_access_policy: owner
