@@ -108,22 +108,41 @@ func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenF
 	return cli, nil
 }
 
+// EndpointCAFile, when set, verifies a manual endpoint with the PEM CAs in
+// this file, or with the system roots when it is "system", instead of the
+// cluster's ClusterTrustBundles. The endpoint is then reached without any
+// Kubernetes access, as through a public gateway in front of ateapi, so a
+// token file is required.
+var EndpointCAFile string
+
 func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool) (*Client, error) {
-	config, err := LoadKubeConfig(kubeconfigPath, k8sContext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
-	}
+	var tlsCfg *tls.Config
+	var clientset *kubernetes.Clientset
+	if EndpointCAFile != "" {
+		if tokenFile == "" {
+			return nil, fmt.Errorf("an endpoint CA file needs a token file: there is no Kubernetes access to mint one")
+		}
+		var err error
+		if tlsCfg, err = endpointTLSConfig(EndpointCAFile); err != nil {
+			return nil, err
+		}
+	} else {
+		config, err := LoadKubeConfig(kubeconfigPath, k8sContext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+		}
 
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create k8s client: %w", err)
-	}
+		clientset, err = kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create k8s client: %w", err)
+		}
 
-	// Verify the server before attaching the bearer token below: the token
-	// must never be sent over an unauthenticated channel.
-	tlsCfg, err := serverTLSConfig(ctx, clientset)
-	if err != nil {
-		return nil, err
+		// Verify the server before attaching the bearer token below: the token
+		// must never be sent over an unauthenticated channel.
+		tlsCfg, err = serverTLSConfig(ctx, clientset)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var opts []grpc.DialOption
@@ -239,6 +258,24 @@ func serverTLSConfig(ctx context.Context, clientset kubernetes.Interface) (*tls.
 		RootCAs:    pool,
 		ServerName: apiServerName,
 	}, nil
+}
+
+// endpointTLSConfig verifies an endpoint by its own name with the CAs in
+// caFile, or the system roots for "system".
+func endpointTLSConfig(caFile string) (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if caFile == "system" {
+		return cfg, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read endpoint CA file: %w", err)
+	}
+	cfg.RootCAs = x509.NewCertPool()
+	if !cfg.RootCAs.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("endpoint CA file %q contains no certificates", caFile)
+	}
+	return cfg, nil
 }
 
 // bearerTokenDialOption attaches the configured token, or mints an ate-client
