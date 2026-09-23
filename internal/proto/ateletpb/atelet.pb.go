@@ -826,7 +826,15 @@ type SandboxAssets struct {
 	// binaries above it is sandbox configuration, not workload configuration,
 	// and atelet pins it into the snapshot manifest so a restore rebuilds the
 	// sandbox from the same image.
-	PauseImage    string `protobuf:"bytes,3,opt,name=pause_image,json=pauseImage,proto3" json:"pause_image,omitempty"`
+	PauseImage string `protobuf:"bytes,3,opt,name=pause_image,json=pauseImage,proto3" json:"pause_image,omitempty"`
+	// cpu_features, when non-empty, levels a gVisor sandbox's guest CPUID to
+	// the intersection of the host's CPU features and this list (gVisor's
+	// dev.gvisor.internal.cpufeatures OCI annotation), so a checkpoint taken
+	// from this actor records that levelled set rather than the raw host CPU.
+	// Like pause_image, it is pinned into the snapshot manifest so a restore
+	// reapplies the same value the checkpoint was taken with. Empty keeps the
+	// raw host feature set. x86_64 (amd64) only; see SandboxConfig.spec.cpuFeatures.
+	CpuFeatures   []string `protobuf:"bytes,4,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -880,6 +888,13 @@ func (x *SandboxAssets) GetPauseImage() string {
 		return x.PauseImage
 	}
 	return ""
+}
+
+func (x *SandboxAssets) GetCpuFeatures() []string {
+	if x != nil {
+		return x.CpuFeatures
+	}
+	return nil
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
@@ -2726,12 +2741,13 @@ const file_atelet_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12'\n" +
-	"\x05value\x18\x02 \x01(\v2\x11.atelet.AssetFileR\x05value:\x028\x01\"\xdf\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x11.atelet.AssetFileR\x05value:\x028\x01\"\x82\x02\n" +
 	"\rSandboxAssets\x12#\n" +
 	"\rsandbox_class\x18\x01 \x01(\tR\fsandboxClass\x129\n" +
 	"\x06assets\x18\x02 \x03(\v2!.atelet.SandboxAssets.AssetsEntryR\x06assets\x12\x1f\n" +
 	"\vpause_image\x18\x03 \x01(\tR\n" +
-	"pauseImage\x1aM\n" +
+	"pauseImage\x12!\n" +
+	"\fcpu_features\x18\x04 \x03(\tR\vcpuFeatures\x1aM\n" +
 	"\vAssetsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
 	"\x05value\x18\x02 \x01(\v2\x12.atelet.ArchAssetsR\x05value:\x028\x01\"~\n" +

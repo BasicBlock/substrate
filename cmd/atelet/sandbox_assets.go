@@ -85,6 +85,13 @@ type sandboxAssetsRecord struct {
 	// rather than taken from the request at Restore so a snapshot is rebuilt
 	// with the same sandbox it was captured from.
 	PauseImage string `json:"pauseImage"`
+	// CPUFeatures, when non-empty, levels the gVisor sandbox's guest CPUID (see
+	// ocispec.GVisorOptions.CPUFeatures). Recorded here for the same reason as
+	// PauseImage: a restore reapplies the value the checkpoint was taken with,
+	// not whatever the SandboxConfig says today. Empty in records written
+	// before this field existed, which is equivalent to "unset" (raw host
+	// features).
+	CPUFeatures []string `json:"cpuFeatures,omitempty"`
 	// Actor identity makes a flat snapshot self-identifying if control-plane
 	// persistence is unavailable.
 	Atespace              string `json:"atespace,omitempty"`
@@ -122,6 +129,7 @@ func recordFromRequest(sa *ateletpb.SandboxAssets) (*sandboxAssetsRecord, error)
 	rec := &sandboxAssetsRecord{
 		SandboxClass: sa.GetSandboxClass(),
 		PauseImage:   sa.GetPauseImage(),
+		CPUFeatures:  sa.GetCpuFeatures(),
 		Assets:       make(map[string]assetEntry, len(archAssets.GetFiles())),
 	}
 	for name, f := range archAssets.GetFiles() {

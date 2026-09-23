@@ -171,6 +171,15 @@ message SandboxAssets {
   // and atelet pins it into the snapshot manifest so a restore rebuilds the
   // sandbox from the same image.
   string pause_image = 3;
+
+  // cpu_features, when non-empty, levels a gVisor sandbox's guest CPUID to
+  // the intersection of the host's CPU features and this list (gVisor's
+  // dev.gvisor.internal.cpufeatures OCI annotation), so a checkpoint taken
+  // from this actor records that levelled set rather than the raw host CPU.
+  // Like pause_image, it is pinned into the snapshot manifest so a restore
+  // reapplies the same value the checkpoint was taken with. Empty keeps the
+  // raw host feature set. x86_64 (amd64) only; see SandboxConfig.spec.cpuFeatures.
+  repeated string cpu_features = 4;
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.

@@ -15,6 +15,7 @@
 package controlapi
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -115,5 +116,34 @@ func TestResolveSandboxAssets(t *testing.T) {
 				t.Errorf("pause image = %q, want %q", got.GetPauseImage(), tt.wantPauseImage)
 			}
 		})
+	}
+}
+
+// TestSandboxAssetsProto_CPUFeatures pins CPU-feature leveling
+// (agent-substrate/substrate#1657) travelling with the sandbox binaries: set
+// on the SandboxConfig, it reaches the ateletpb.SandboxAssets atelet fetches;
+// unset, the proto field stays empty.
+func TestSandboxAssetsProto_CPUFeatures(t *testing.T) {
+	withFeatures := &atev1alpha1.SandboxConfig{
+		Spec: atev1alpha1.SandboxConfigSpec{
+			SandboxClass: atev1alpha1.SandboxClassGvisor,
+			PauseImage:   "gcr.io/gke-release/pause@sha256:x",
+			Assets:       testAssets(),
+			CPUFeatures:  []atev1alpha1.CPUFeatureName{"avx512f", "fsgsbase"},
+		},
+	}
+	if got, want := sandboxAssetsProto(withFeatures).GetCpuFeatures(), []string{"avx512f", "fsgsbase"}; !slices.Equal(got, want) {
+		t.Errorf("CpuFeatures = %v, want %v", got, want)
+	}
+
+	withoutFeatures := &atev1alpha1.SandboxConfig{
+		Spec: atev1alpha1.SandboxConfigSpec{
+			SandboxClass: atev1alpha1.SandboxClassGvisor,
+			PauseImage:   "gcr.io/gke-release/pause@sha256:x",
+			Assets:       testAssets(),
+		},
+	}
+	if got := sandboxAssetsProto(withoutFeatures).GetCpuFeatures(); len(got) != 0 {
+		t.Errorf("CpuFeatures = %v, want empty when unset", got)
 	}
 }
