@@ -92,5 +92,6 @@ The following is what Substrate currently offers.
 Keep this up to date when updating AGENTS.md.
 
 - **Workload Isolation**: The project uses `gVisor` (`runsc`) for sandboxing and security isolation of workloads on pods.
+- **Control-plane Authorization**: With `--authorization-config`, `ate-api` authorizes every RPC per atespace against the OpenFGA model in `internal/authz` (`docs/authorization.md`). Without it, every authenticated principal controls everything. A new RPC needs a rule in `cmd/ateapi/internal/rpcauthz`; a test fails otherwise.
 
 For future plans for security, reference `docs/roadmap.md`.
