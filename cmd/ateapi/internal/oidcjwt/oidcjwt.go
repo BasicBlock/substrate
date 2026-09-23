@@ -131,6 +131,9 @@ type Verifier struct {
 	issuer     string
 	audiences  []string
 	httpClient *http.Client
+	// jwksURI, when set, is where the signing keys are published, for an
+	// issuer without an OIDC discovery document (such as Identity-Aware Proxy).
+	jwksURI string
 
 	mu                    sync.RWMutex
 	keys                  []*KeyAndID
@@ -143,6 +146,14 @@ type Verifier struct {
 // one of its audiences matches audiences.
 func NewVerifier(issuer string, audiences []string, httpClient *http.Client) *Verifier {
 	return &Verifier{issuer: issuer, audiences: slices.Clone(audiences), httpClient: httpClient}
+}
+
+// NewVerifierWithJWKS returns a verifier for an issuer that publishes its
+// signing keys at jwksURI instead of through OIDC discovery.
+func NewVerifierWithJWKS(issuer string, audiences []string, jwksURI string, httpClient *http.Client) *Verifier {
+	v := NewVerifier(issuer, audiences, httpClient)
+	v.jwksURI = jwksURI
+	return v
 }
 
 // Verify verifies and extracts claims from a JWT.
@@ -321,7 +332,13 @@ func (v *Verifier) key(ctx context.Context, keyID string, now time.Time) (crypto
 	if key == nil && len(v.keys) > 0 {
 		v.lastUnknownKeyRefresh = now
 	}
-	keys, err := discoverKeysForIssuer(ctx, v.httpClient, v.issuer)
+	var keys []*KeyAndID
+	var err error
+	if v.jwksURI != "" {
+		keys, err = fetchKeys(ctx, v.httpClient, v.issuer, v.jwksURI)
+	} else {
+		keys, err = discoverKeysForIssuer(ctx, v.httpClient, v.issuer)
+	}
 	if err != nil {
 		v.lastFailedRefresh = now
 		if key != nil {
@@ -485,8 +502,12 @@ func discoverKeysForIssuer(ctx context.Context, httpClient *http.Client, issuer 
 	}
 
 	slog.InfoContext(ctx, "Fetched discovery doc", slog.Any("doc", oidcConfig))
+	return fetchKeys(ctx, httpClient, issuer, oidcConfig.JWKSURI)
+}
 
-	jwkSet, err := fetchJSON[jwkSetT](ctx, httpClient, oidcConfig.JWKSURI)
+// fetchKeys fetches and parses the JWK set at jwksURI.
+func fetchKeys(ctx context.Context, httpClient *http.Client, issuer, jwksURI string) ([]*KeyAndID, error) {
+	jwkSet, err := fetchJSON[jwkSetT](ctx, httpClient, jwksURI)
 	if err != nil {
 		return nil, fmt.Errorf("while fetching JWKS: %w", err)
 	}
