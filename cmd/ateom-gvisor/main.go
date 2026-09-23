@@ -78,7 +78,7 @@ var (
 	atunnelEgressListenAddress  = pflag.String("atunnel-egress-listen-address", "0.0.0.0:15001", "Address for transparently intercepted actor egress TCP")
 	egressGatewayTrustBundle    = pflag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "Service DNS trust bundle for the remote egress gateway")
 	readinessListenAddress      = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
-	drainSuspendWait            = pflag.Duration("drain-suspend-wait", 2*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the running actor (a CheckpointWorkload, which ends the session) before stopping it with SIGTERM instead. 0 stops it without waiting.")
+	drainSuspendWait            = pflag.Duration("drain-suspend-wait", 5*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the running actor (a CheckpointWorkload, which ends the session) before stopping it with SIGTERM instead. Bounded by workloadGracePeriod (30 minutes) regardless of this value, and comfortably inside the worker pod's own terminationGracePeriodSeconds (60 minutes, set by atecontroller). 0 stops it without waiting.")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")

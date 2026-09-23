@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,7 +30,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 )
@@ -52,6 +57,27 @@ const workerPoolIndex = "worker-pool"
 // ateom stops an Actor that no suspend has reached within its own shutdown
 // budget (30 minutes), so trying for longer cannot help.
 const drainSuspendTimeout = 30 * time.Minute
+
+// The default retry backoff schedule for a failed SuspendActor call while
+// draining a Worker: a transient failure (ate-api Unavailable, an atelet
+// being replaced mid-release, a version conflict) should not cost the Actor
+// its state after a single attempt. Doubles from defaultSuspendBackoff up to
+// defaultSuspendBackoffCap. Per-syncer, like listBackoff and listCap, so a
+// test can shrink them.
+const (
+	defaultSuspendBackoff    = 2 * time.Second
+	defaultSuspendBackoffCap = 15 * time.Second
+)
+
+// assignedWorkerDeletionCost and freeWorkerDeletionCost are the
+// corev1.PodDeletionCost values a worker pod is annotated with. A WorkerPool
+// scale-down deletes pods through its Deployment's ReplicaSet, which deletes
+// its lowest-cost pods first, so a free worker (no Actor bound) is preferred
+// over one hosting an Actor.
+const (
+	freeWorkerDeletionCost     = 0
+	assignedWorkerDeletionCost = 1000
+)
 
 // workerKey identifies the pod incarnation a queued event concerns. namespace
 // and name locate the pod in the informer, which is indexed by namespace/name
@@ -101,6 +127,7 @@ func (k workerKey) logAttrs() []any {
 // backoff on transient failures such as a lost version precondition.
 type WorkerPoolSyncer struct {
 	client             ateapipb.ControlClient
+	k8sClient          kubernetes.Interface
 	workerInformer     cache.SharedIndexInformer
 	workerPoolInformer cache.SharedIndexInformer
 	queue              workqueue.TypedRateLimitingInterface[workerKey]
@@ -111,20 +138,30 @@ type WorkerPoolSyncer struct {
 	listBackoff time.Duration
 	listCap     time.Duration
 
+	// Exponential backoff schedule for retrying a draining Worker's failed
+	// SuspendActor call. Per-syncer, like listBackoff and listCap.
+	suspendBackoff    time.Duration
+	suspendBackoffCap time.Duration
+
 	// suspending holds the names of Workers with a suspend pass in progress,
 	// so repeated events on a Terminating pod start at most one at a time.
 	suspending sync.Map
 }
 
-// NewWorkerPoolSyncer creates a new WorkerPoolSyncer.
-func NewWorkerPoolSyncer(client ateapipb.ControlClient, workerInformer, workerPoolInformer cache.SharedIndexInformer) *WorkerPoolSyncer {
+// NewWorkerPoolSyncer creates a new WorkerPoolSyncer. k8sClient is used only to
+// patch a worker pod's pod-deletion-cost annotation; the informers remain the
+// source of truth for pod state.
+func NewWorkerPoolSyncer(client ateapipb.ControlClient, k8sClient kubernetes.Interface, workerInformer, workerPoolInformer cache.SharedIndexInformer) *WorkerPoolSyncer {
 	return &WorkerPoolSyncer{
 		client:             client,
+		k8sClient:          k8sClient,
 		workerInformer:     workerInformer,
 		workerPoolInformer: workerPoolInformer,
 		queue:              workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[workerKey]()),
 		listBackoff:        defaultListBackoff,
 		listCap:            defaultListCap,
+		suspendBackoff:     defaultSuspendBackoff,
+		suspendBackoffCap:  defaultSuspendBackoffCap,
 	}
 }
 
@@ -330,11 +367,23 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 		// ALREADY_EXISTS means we lost a create race; requeue and converge via
 		// the update path. INVALID_ARGUMENT is terminal — see
 		// processNextWorkItem.
-		_, err := s.client.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: worker})
-		return err
+		created, err := s.client.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: worker})
+		if err != nil {
+			return err
+		}
+		// A freshly registered worker has no Actor bound yet.
+		return s.syncDeletionCostAnnotation(ctx, key, pod, created)
 	}
 	if err != nil {
 		return fmt.Errorf("getting worker: %w", err)
+	}
+
+	// The scheduler is what binds and releases Actors, and neither necessarily
+	// touches this pod, so nothing else would otherwise notice the change: this
+	// runs on every reconcile of an ACTIVE worker, including the informer's
+	// periodic resync, to keep the annotation from drifting silently stale.
+	if err := s.syncDeletionCostAnnotation(ctx, key, pod, w); err != nil {
+		return fmt.Errorf("syncing worker pod-deletion-cost: %w", err)
 	}
 
 	// UpdateWorker replaces the whole resource, so the one mutable field is
@@ -378,6 +427,34 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 	return err
 }
 
+// syncDeletionCostAnnotation keeps pod's corev1.PodDeletionCost annotation in
+// step with whether worker currently hosts an Actor: freeWorkerDeletionCost
+// when it does not, assignedWorkerDeletionCost when it does. A WorkerPool
+// scale-down deletes the Deployment's lowest-cost pods first, so this is what
+// makes it prefer a free worker over one an Actor is running on. Patches the
+// pod only when the annotation's value would change; a pod already gone by
+// the time the patch lands has nothing left to annotate.
+func (s *WorkerPoolSyncer) syncDeletionCostAnnotation(ctx context.Context, key workerKey, pod *corev1.Pod, worker *ateapipb.Worker) error {
+	cost := freeWorkerDeletionCost
+	if worker.GetStatus().GetAllocated().GetActors() > 0 {
+		cost = assignedWorkerDeletionCost
+	}
+	want := strconv.Itoa(cost)
+	if pod.GetAnnotations()[corev1.PodDeletionCost] == want {
+		return nil
+	}
+	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:%q}}}`, corev1.PodDeletionCost, want)
+	_, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "Syncer: set worker pod-deletion-cost", append(key.logAttrs(), slog.String("cost", want))...)
+	return nil
+}
+
 func isWorkerEligible(pod *corev1.Pod) bool {
 	if pod.Status.PodIP == "" {
 		return false
@@ -408,9 +485,10 @@ func (s *WorkerPoolSyncer) markWorkerDraining(ctx context.Context, key workerKey
 // suspendDrainingActors suspends the Actors bound to a draining Worker in the
 // background: SuspendActor checkpoints the actor and uploads its snapshot,
 // which takes long enough that it must not hold a queue worker. At most one
-// pass runs per Worker, and every later event on the Terminating pod starts
-// another once it has finished, so an Actor whose suspend failed is retried;
-// a pass over a Worker with nothing bound is a single list.
+// pass runs per Worker; a pass over a Worker with nothing bound is a single
+// list. Each Actor is retried with backoff until it is suspended, until it no
+// longer needs saving here, or until the pass gives up on it — see
+// suspendWithRetry.
 func (s *WorkerPoolSyncer) suspendDrainingActors(ctx context.Context, key workerKey) {
 	name := key.workerName()
 	if _, running := s.suspending.LoadOrStore(name, struct{}{}); running {
@@ -421,20 +499,71 @@ func (s *WorkerPoolSyncer) suspendDrainingActors(ctx context.Context, key worker
 		ctx, cancel := context.WithTimeout(ctx, drainSuspendTimeout)
 		defer cancel()
 		for _, actor := range s.boundActors(ctx, key) {
-			attrs := append(key.logAttrs(), slog.String("actor", actor.GetAtespace()+"/"+actor.GetName()))
-			_, err := s.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: actor})
-			switch status.Code(err) {
-			case codes.OK:
-				slog.InfoContext(ctx, "Syncer: suspended actor of draining worker", attrs...)
-			case codes.NotFound, codes.FailedPrecondition:
-				// Deleted, or not running (resuming, crashed, already
-				// suspended by someone else): nothing to save here.
-				slog.InfoContext(ctx, "Syncer: not suspending actor of draining worker", append(attrs, slog.Any("err", err))...)
-			default:
-				slog.WarnContext(ctx, "Syncer: suspending actor of draining worker failed", append(attrs, slog.Any("err", err))...)
-			}
+			s.suspendWithRetry(ctx, key, actor)
 		}
 	}()
+}
+
+// suspendWithRetry suspends one Actor bound to a draining Worker, retrying a
+// failed attempt with exponential backoff (suspendBackoff doubling up to
+// suspendBackoffCap) instead of leaving it to the next pod event: a suspend
+// can fail transiently — ate-api Unavailable, an atelet being replaced
+// mid-release, a version conflict — and giving up on the first attempt would
+// cost the Actor its state to ateom's SIGTERM fallback.
+//
+// It stops once the Actor is suspended (OK — including one already suspended
+// by someone else, which SuspendActor fast-forwards past), once it no longer
+// needs saving here (NotFound: deleted; FailedPrecondition: not running —
+// resuming, crashed, or otherwise not RUNNING/PAUSED), once the Worker's pod
+// is gone, or once ctx (the pass's overall drainSuspendTimeout) ends.
+func (s *WorkerPoolSyncer) suspendWithRetry(ctx context.Context, key workerKey, actor *ateapipb.ObjectRef) {
+	attrs := append(key.logAttrs(), slog.String("actor", actor.GetAtespace()+"/"+actor.GetName()))
+	backoff := s.suspendBackoff
+	for {
+		_, err := s.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: actor})
+		switch status.Code(err) {
+		case codes.OK:
+			slog.InfoContext(ctx, "Syncer: suspended actor of draining worker", attrs...)
+			return
+		case codes.NotFound, codes.FailedPrecondition:
+			// Deleted, or not running (resuming, crashed, already
+			// suspended by someone else): nothing to save here.
+			slog.InfoContext(ctx, "Syncer: not suspending actor of draining worker", append(attrs, slog.Any("err", err))...)
+			return
+		}
+		if s.podGone(key) {
+			slog.InfoContext(ctx, "Syncer: worker pod gone before its actor could be suspended, abandoning",
+				append(attrs, slog.Any("err", err))...)
+			return
+		}
+		slog.WarnContext(ctx, "Syncer: suspending actor of draining worker failed, retrying",
+			append(attrs, slog.Any("err", err), slog.Duration("backoff", backoff))...)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, s.suspendBackoffCap)
+	}
+}
+
+// podGone reports whether key's pod incarnation is no longer live in the
+// informer cache: deleted outright, or replaced by a new pod under the same
+// name. suspendWithRetry checks this so a run of transient failures gives up
+// once there is nothing left to suspend for, rather than spinning until the
+// pass's overall drainSuspendTimeout.
+func (s *WorkerPoolSyncer) podGone(key workerKey) bool {
+	obj, exists, err := s.workerInformer.GetIndexer().GetByKey(key.namespace + "/" + key.name)
+	if err != nil {
+		// A local cache lookup failing is not evidence the pod is gone; let the
+		// next check, or the overall timeout, decide.
+		return false
+	}
+	if !exists {
+		return true
+	}
+	pod, ok := obj.(*corev1.Pod)
+	return !ok || string(pod.UID) != key.uid
 }
 
 // boundActors lists the Actors assigned to a Worker. A Worker already gone has
