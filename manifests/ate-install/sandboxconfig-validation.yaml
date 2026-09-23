@@ -48,6 +48,16 @@ spec:
          ['cloud-hypervisor', 'virtiofsd', 'kata-kernel', 'kata-image']
            .all(name, name in object.spec.assets[arch])))
     message: "a microvm SandboxConfig must define cloud-hypervisor, virtiofsd, kata-kernel, and kata-image assets for every architecture under spec.assets"
+  # CPU feature leveling (dev.gvisor.internal.cpufeatures; see
+  # https://github.com/agent-substrate/substrate/issues/1657) only applies to
+  # gVisor: it is meaningless for the micro-VM runtime, and gVisor's
+  # FeatureSet.Intersect is unsupported on ARM64, so a SandboxConfig that
+  # advertises arm64 assets must not set it.
+  - expression: >-
+      !has(object.spec.cpuFeatures) || size(object.spec.cpuFeatures) == 0 ||
+      (object.spec.sandboxClass == 'gvisor' &&
+       (!has(object.spec.assets) || object.spec.assets.all(arch, arch != 'arm64')))
+    message: "spec.cpuFeatures is only supported on a gvisor SandboxConfig that does not declare arm64 assets (gVisor CPU feature leveling is x86_64-only; see https://github.com/agent-substrate/substrate/issues/1657)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
