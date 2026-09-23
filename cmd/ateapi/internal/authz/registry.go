@@ -118,6 +118,48 @@ func both(aChecks []check, aErrs field.ErrorList, bChecks []check, bErrs field.E
 	return slices.Concat(aChecks, bChecks), nil
 }
 
+// onRefAtespace checks relation on the atespace an *ateapipb.ObjectRef or
+// *ateapipb.ResourceMetadata names through its Atespace field, such as a tag's
+// (a tag has no OpenFGA type of its own, so its atespace stands for it).
+func onRefAtespace(relation string, ref resourceRef, fldPath *field.Path) ([]check, field.ErrorList) {
+	return onAtespace(relation, ref.GetAtespace(), fldPath.Child("atespace"))
+}
+
+// actorOf is a request that names its actor by an *ateapipb.ObjectRef.
+type actorOf interface{ GetActor() *ateapipb.ObjectRef }
+
+// onNamedActor requires relation on the actor a request names.
+func onNamedActor[T actorOf](relation string) rpcRule {
+	return rule(checksOf(func(r T) ([]check, field.ErrorList) {
+		return onActor(relation, r.GetActor(), field.NewPath("actor"))
+	}))
+}
+
+// onGlobalOf requires relation on global:root for a request of type T. The
+// relation may be an owner role: only global owners may make these calls.
+func onGlobalOf[T any](relation string) rpcRule {
+	return rule(checksOf(func(T) ([]check, field.ErrorList) {
+		return onGlobal(relation)
+	}))
+}
+
+// sourceTagChecks requires can_get on the atespace of the tag an actor is
+// created or updated from, which can differ from the actor's own.
+func sourceTagChecks(actor *ateapipb.Actor) ([]check, field.ErrorList) {
+	tag := actor.GetSourceTag()
+	if tag.GetAtespace() == "" {
+		return nil, nil
+	}
+	return onAtespace(RelationCanGet, tag.GetAtespace(), field.NewPath("actor", "source_tag", "atespace"))
+}
+
+// handlerAuthorized marks a method whose handler authorizes the caller itself
+// (such as an atelet SPIFFE-ID check), so the interceptor only requires a
+// principal and otherwise steps aside.
+func handlerAuthorized[T any]() rpcRule {
+	return rule(checksOf(func(T) ([]check, field.ErrorList) { return nil, nil }))
+}
+
 // rpcRule is the permission rule for one RPC.
 type rpcRule struct {
 	extract checkExtractor
@@ -194,7 +236,8 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapipb.Control_CreateActor_FullMethodName: rule(checksOf(func(r *ateapipb.CreateActorRequest) ([]check, field.ErrorList) {
 		actorChecks, actorErrs := onAtespace(RelationCanCreateActor, r.GetActor().GetMetadata().GetAtespace(), field.NewPath("actor", "metadata", "atespace"))
 		templateChecks, templateErrs := onActorTemplate(RelationCanUseTemplate, r.GetActor().GetActorTemplate(), field.NewPath("actor", "actor_template"))
-		return both(actorChecks, actorErrs, templateChecks, templateErrs)
+		tagChecks, tagErrs := sourceTagChecks(r.GetActor())
+		return both(actorChecks, actorErrs, slices.Concat(templateChecks, tagChecks), append(templateErrs, tagErrs...))
 	})),
 	ateapipb.Control_GetActor_FullMethodName: rule(checksOf(func(r *ateapipb.GetActorRequest) ([]check, field.ErrorList) {
 		return onActor(RelationCanGet, r.GetActor(), field.NewPath("actor"))
@@ -205,9 +248,70 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapipb.Control_UpdateActor_FullMethodName: rule(checksOf(func(r *ateapipb.UpdateActorRequest) ([]check, field.ErrorList) {
 		actorChecks, actorErrs := onActor(RelationCanUpdate, r.GetActor().GetMetadata(), field.NewPath("actor", "metadata"))
 		templateChecks, templateErrs := onActorTemplate(RelationCanUseTemplate, r.GetActor().GetActorTemplate(), field.NewPath("actor", "actor_template"))
-		return both(actorChecks, actorErrs, templateChecks, templateErrs)
+		tagChecks, tagErrs := sourceTagChecks(r.GetActor())
+		return both(actorChecks, actorErrs, slices.Concat(templateChecks, tagChecks), append(templateErrs, tagErrs...))
 	})),
 	ateapipb.Control_DeleteActor_FullMethodName: rule(checksOf(func(r *ateapipb.DeleteActorRequest) ([]check, field.ErrorList) {
 		return onActor(RelationCanDelete, r.GetActor(), field.NewPath("actor"))
 	})),
+
+	// Actor lifecycle. Pausing keeps a node-local snapshot: the same authority
+	// as suspending.
+	ateapipb.Control_SuspendActor_FullMethodName: onNamedActor[*ateapipb.SuspendActorRequest](RelationCanSuspend),
+	ateapipb.Control_PauseActor_FullMethodName:   onNamedActor[*ateapipb.PauseActorRequest](RelationCanSuspend),
+	ateapipb.Control_ResumeActor_FullMethodName:  onNamedActor[*ateapipb.ResumeActorRequest](RelationCanResume),
+	ateapipb.Control_RevertActor_FullMethodName:  onNamedActor[*ateapipb.RevertActorRequest](RelationCanRevert),
+
+	// Egress policies belong to their actor: reading one needs can_get on it,
+	// changing one can_update.
+	ateapipb.Control_GetActorEgressPolicy_FullMethodName:    onNamedActor[*ateapipb.GetActorEgressPolicyRequest](RelationCanGet),
+	ateapipb.Control_CreateActorEgressPolicy_FullMethodName: onNamedActor[*ateapipb.CreateActorEgressPolicyRequest](RelationCanUpdate),
+	ateapipb.Control_UpdateActorEgressPolicy_FullMethodName: onNamedActor[*ateapipb.UpdateActorEgressPolicyRequest](RelationCanUpdate),
+	ateapipb.Control_DeleteActorEgressPolicy_FullMethodName: onNamedActor[*ateapipb.DeleteActorEgressPolicyRequest](RelationCanUpdate),
+
+	// Actor credentials are minted for Substrate's own components (the egress
+	// gateway and atelet); only a global owner may ask for one.
+	ateapipb.Control_MintActorJWT_FullMethodName:         onGlobalOf[*ateapipb.MintActorJWTRequest](RoleOwner),
+	ateapipb.Control_MintActorCertificate_FullMethodName: onGlobalOf[*ateapipb.MintActorCertificateRequest](RoleOwner),
+
+	// Tags have no type of their own: reading one needs can_get on its
+	// atespace, changing one can_update.
+	ateapipb.Control_CreateTag_FullMethodName: rule(checksOf(func(r *ateapipb.CreateTagRequest) ([]check, field.ErrorList) {
+		tag := r.GetTag()
+		tagChecks, tagErrs := onRefAtespace(RelationCanUpdate, tag.GetMetadata(), field.NewPath("tag", "metadata"))
+		// The source actor may live in another atespace.
+		var srcChecks []check
+		var srcErrs field.ErrorList
+		if src := tag.GetSourceActor(); src.GetAtespace() != "" || src.GetName() != "" {
+			srcChecks, srcErrs = onActor(RelationCanGet, src, field.NewPath("tag", "source_actor"))
+		}
+		return both(tagChecks, tagErrs, srcChecks, srcErrs)
+	})),
+	ateapipb.Control_GetTag_FullMethodName: rule(checksOf(func(r *ateapipb.GetTagRequest) ([]check, field.ErrorList) {
+		return onRefAtespace(RelationCanGet, r.GetTag(), field.NewPath("tag"))
+	})),
+	ateapipb.Control_ListTags_FullMethodName: rule(checksOf(func(r *ateapipb.ListTagsRequest) ([]check, field.ErrorList) {
+		return onAtespaceOrGlobal(RelationCanGet, r.GetAtespace(), field.NewPath("atespace"))
+	})),
+	ateapipb.Control_UpdateTag_FullMethodName: rule(checksOf(func(r *ateapipb.UpdateTagRequest) ([]check, field.ErrorList) {
+		return onRefAtespace(RelationCanUpdate, r.GetTag().GetMetadata(), field.NewPath("tag", "metadata"))
+	})),
+	ateapipb.Control_DeleteTag_FullMethodName: rule(checksOf(func(r *ateapipb.DeleteTagRequest) ([]check, field.ErrorList) {
+		return onRefAtespace(RelationCanUpdate, r.GetTag(), field.NewPath("tag"))
+	})),
+
+	// Workers are cluster infrastructure.
+	ateapipb.Control_ListWorkers_FullMethodName:                onGlobalOf[*ateapipb.ListWorkersRequest](RoleOwner),
+	ateapipb.Control_GetWorker_FullMethodName:                  onGlobalOf[*ateapipb.GetWorkerRequest](RoleOwner),
+	ateapipb.Control_CreateWorker_FullMethodName:               onGlobalOf[*ateapipb.CreateWorkerRequest](RoleOwner),
+	ateapipb.Control_UpdateWorker_FullMethodName:               onGlobalOf[*ateapipb.UpdateWorkerRequest](RoleOwner),
+	ateapipb.Control_DeleteWorker_FullMethodName:               onGlobalOf[*ateapipb.DeleteWorkerRequest](RoleOwner),
+	ateapipb.Control_DrainWorker_FullMethodName:                onGlobalOf[*ateapipb.DrainWorkerRequest](RoleOwner),
+	ateapipb.Control_ListWorkerActorAssignments_FullMethodName: onGlobalOf[*ateapipb.ListWorkerActorAssignmentsRequest](RoleOwner),
+
+	// atelet authenticates itself by SPIFFE ID in every handler here; none
+	// needs a per-atespace or global OpenFGA check as well.
+	ateapipb.WorkerService_RegisterWorker_FullMethodName:            handlerAuthorized[*ateapipb.RegisterWorkerRequest](),
+	ateapipb.WorkerService_MintAteomActorCertificate_FullMethodName: handlerAuthorized[*ateapipb.MintAteomActorCertificateRequest](),
+	ateapipb.WorkerService_RequestActorSuspend_FullMethodName:       handlerAuthorized[*ateapipb.RequestActorSuspendRequest](),
 }

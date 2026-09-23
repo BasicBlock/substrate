@@ -57,6 +57,9 @@ const (
 	RelationCanGetAccessPolicy     = "can_get_access_policy"
 	RelationCanUpdateAccessPolicy  = "can_update_access_policy"
 	RelationCanDeleteAccessPolicy  = "can_delete_access_policy"
+	RelationCanSuspend             = "can_suspend"
+	RelationCanResume              = "can_resume"
+	RelationCanRevert              = "can_revert"
 
 	// maxTuplesPerWrite is OpenFGA's default maximum number of tuples allowed in a single Write request.
 	maxTuplesPerWrite = 100
@@ -116,6 +119,11 @@ func atespacedID(atespace, name string) string {
 	return objectIDReplacer.Replace(atespace) + "/" + objectIDReplacer.Replace(name)
 }
 
+// GroupObject formats a group name as an OpenFGA object string.
+func GroupObject(name string) string {
+	return "group:" + tupleReplacer.Replace(name)
+}
+
 // formatUser formats a principal ID as a valid OpenFGA user string.
 // OpenFGA disallows ':', '#', whitespace, and treats '*' as a public wildcard;
 // these characters (plus '%') are percent-encoded to prevent collisions and
@@ -124,13 +132,24 @@ func formatUser(id string) string {
 	return "user:" + tupleReplacer.Replace(id)
 }
 
-// FormatMember validates a policy member string (such as "user:alice@example.com")
-// and returns the percent-encoded OpenFGA user string. Control characters are
-// rejected because OpenFGA does not accept them in tuple user IDs.
+// FormatMember validates a policy member string — "user:<id>" or
+// "group:<name>" (a JWT provider name or "<provider>/<claim-rule>", matching
+// a principal's Groups) — and returns its percent-encoded OpenFGA form, ready
+// to bind a role to. Control characters are rejected because OpenFGA does not
+// accept them in tuple user IDs.
 func FormatMember(member string) (string, error) {
+	if name, ok := strings.CutPrefix(member, "group:"); ok {
+		if strings.TrimSpace(name) == "" {
+			return "", fmt.Errorf("member %q must have non-empty \"group:<name>\" format", member)
+		}
+		if strings.ContainsFunc(name, unicode.IsControl) {
+			return "", fmt.Errorf("member %q must not contain control characters", member)
+		}
+		return GroupObject(name) + "#member", nil
+	}
 	id, ok := strings.CutPrefix(member, "user:")
 	if !ok || strings.TrimSpace(id) == "" {
-		return "", fmt.Errorf("member %q must have non-empty \"user:<id>\" format", member)
+		return "", fmt.Errorf("member %q must have non-empty \"user:<id>\" or \"group:<name>\" format", member)
 	}
 	if id == "*" {
 		return "", fmt.Errorf("wildcard member %q is not allowed", member)
@@ -212,6 +231,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, fgaServer *server.Server, boot
 		fgaServer:       fgaServer,
 		storeID:         storeID,
 		modelID:         modelID,
+		pool:            pool,
 		bootstrapOwners: owners,
 	}
 	policyManager := &PolicyManager{
