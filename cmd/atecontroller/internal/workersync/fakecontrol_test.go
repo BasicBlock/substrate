@@ -189,6 +189,22 @@ func (f *fakeControl) putLocked(w *ateapipb.Worker) *ateapipb.Worker {
 	return proto.Clone(stored).(*ateapipb.Worker)
 }
 
+// setAllocatedActors sets a registered Worker's allocated actor count, as the
+// scheduler does when it places or releases an Actor. A no-op if the Worker is
+// not registered.
+func (f *fakeControl) setAllocatedActors(name string, n int32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w, ok := f.workers[name]
+	if !ok {
+		return
+	}
+	if w.Status == nil {
+		w.Status = &ateapipb.WorkerStatus{}
+	}
+	w.Status.Allocated = &ateapipb.WorkerResources{Actors: n}
+}
+
 func (f *fakeControl) setCreateHook(hook func(*ateapipb.Worker) error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

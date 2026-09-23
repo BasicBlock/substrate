@@ -68,7 +68,7 @@ var (
 
 	readinessListenAddress = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
 	maxActors              = pflag.Int("max-actors", 1000, "How many actors this worker will host at once")
-	drainSuspendWait       = pflag.Duration("drain-suspend-wait", 2*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the draining actor(s) (a CheckpointWorkload, which ends the session) before stopping them with SIGTERM instead. 0 stops them without waiting.")
+	drainSuspendWait       = pflag.Duration("drain-suspend-wait", 5*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the draining actor(s) (a CheckpointWorkload, which ends the session) before stopping them with SIGTERM instead. Bounded by workloadGracePeriod (30 minutes) regardless of this value, and comfortably inside the worker pod's own terminationGracePeriodSeconds (60 minutes, set by atecontroller). 0 stops them without waiting.")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
