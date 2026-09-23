@@ -53,3 +53,38 @@ func TestGVisorCgroupLeafMatchesTheShapedPath(t *testing.T) {
 		t.Errorf("shaped cgroupsPath = %q, want %q", spec.Linux.CgroupsPath, want)
 	}
 }
+
+// ShapeGVisor sets the runsc CPU-feature-leveling annotation, comma-joined,
+// only when CPUFeatures is non-empty (agent-substrate/substrate#1657).
+func TestShapeGVisor_CPUFeaturesAnnotation(t *testing.T) {
+	t.Run("unset by default", func(t *testing.T) {
+		spec := &specs.Spec{}
+		ShapeGVisor(spec, GVisorOptions{ActorUID: "uid-a", ContainerName: PauseContainer})
+		if got, ok := spec.Annotations[cpuFeaturesAnnotation]; ok {
+			t.Errorf("%s = %q, want it absent when CPUFeatures is unset", cpuFeaturesAnnotation, got)
+		}
+	})
+
+	t.Run("set when declared", func(t *testing.T) {
+		spec := &specs.Spec{}
+		ShapeGVisor(spec, GVisorOptions{
+			ActorUID:      "uid-a",
+			ContainerName: PauseContainer,
+			CPUFeatures:   []string{"avx512f", "fsgsbase", "3dnow"},
+		})
+		want := "avx512f,fsgsbase,3dnow"
+		if got := spec.Annotations[cpuFeaturesAnnotation]; got != want {
+			t.Errorf("%s = %q, want %q", cpuFeaturesAnnotation, got, want)
+		}
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		spec := &specs.Spec{}
+		o := GVisorOptions{ActorUID: "uid-a", ContainerName: PauseContainer, CPUFeatures: []string{"avx512f"}}
+		ShapeGVisor(spec, o)
+		ShapeGVisor(spec, o)
+		if got, want := spec.Annotations[cpuFeaturesAnnotation], "avx512f"; got != want {
+			t.Errorf("%s = %q after reshaping, want %q", cpuFeaturesAnnotation, got, want)
+		}
+	})
+}

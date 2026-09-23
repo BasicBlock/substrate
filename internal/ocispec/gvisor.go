@@ -16,6 +16,7 @@ package ocispec
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/agent-substrate/substrate/internal/sizing"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -37,6 +38,13 @@ const etcHosts = "/etc/hosts"
 // as a root-owned 0755 directory, which non-root workloads cannot write.
 const devShm = "/dev/shm"
 
+// cpuFeaturesAnnotation is runsc's OCI annotation that levels the sandbox's
+// guest CPUID to the intersection of the host's CPU features and a declared
+// allow-list, so a checkpoint records that levelled set instead of the raw
+// host CPU (google/gvisor#11498). See
+// https://github.com/agent-substrate/substrate/issues/1657.
+const cpuFeaturesAnnotation = "dev.gvisor.internal.cpufeatures"
+
 // GVisorOptions describes the gVisor-specific context of one actor container.
 type GVisorOptions struct {
 	ActorUID      string
@@ -46,6 +54,14 @@ type GVisorOptions struct {
 	// Size sizes the container's cgroup leaf. Only gVisor applies it; a micro-VM
 	// container's limits come from its own declared resources (see sizing).
 	Size sizing.SandboxSize
+	// CPUFeatures, when non-empty, is set as the cpuFeaturesAnnotation so runsc
+	// levels the guest CPUID to host-features ∩ CPUFeatures. Empty leaves the
+	// annotation unset, so runsc exposes the raw host feature set (today's
+	// behavior). Only meaningful for a sandbox created fresh: gVisor consults
+	// the annotation at sandbox boot, before any checkpoint is loaded, and a
+	// restore's compatibility is decided entirely by the feature set already
+	// recorded in the checkpoint image.
+	CPUFeatures []string
 }
 
 // GVisorCgroupLeaf names an actor container's cgroup relative to the pod scope.
@@ -65,6 +81,9 @@ func ShapeGVisor(spec *specs.Spec, o GVisorOptions) {
 	} else {
 		spec.Annotations["io.kubernetes.cri.container-type"] = "container"
 		spec.Annotations["io.kubernetes.cri.sandbox-id"] = PauseContainer
+	}
+	if len(o.CPUFeatures) > 0 {
+		spec.Annotations[cpuFeaturesAnnotation] = strings.Join(o.CPUFeatures, ",")
 	}
 
 	// Match runc, containerd and the micro-VM guest: a world-writable sticky
