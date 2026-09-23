@@ -546,7 +546,7 @@ A worker pod can go away while it hosts running actors: when its `WorkerPool` ro
 
 When the pod gets `SIGTERM`, its worker stops accepting actors and sends `SIGTERM` to the main process of each container of every actor it hosts. Each actor then has 30 minutes, counted from the pod's `SIGTERM`, to be suspended. An actor suspended in that window keeps its state and resumes on another worker like any suspended actor.
 
-atecontroller suspends the actors bound to a terminating worker, and the worker waits up to `--drain-suspend-wait` (2 minutes by default) for that checkpoint to end the session before it sends the `SIGTERM`. If that suspend does not happen, whatever drives the actor, usually its harness, has to call `SuspendActor` (`kubectl ate suspend`) within the 30 minutes. Only the actor gets the `SIGTERM`, so it has to pass that on, for example on an endpoint the harness polls.
+atecontroller suspends the actors bound to a terminating worker, and the worker waits up to `--drain-suspend-wait` (5 minutes by default) for that checkpoint to end the session before it sends the `SIGTERM`. If that suspend does not happen, whatever drives the actor, usually its harness, has to call `SuspendActor` (`kubectl ate suspend`) within the 30 minutes. Only the actor gets the `SIGTERM`, so it has to pass that on, for example on an endpoint the harness polls.
 
 Every actor that must keep its state through an eviction needs a `SIGTERM` handler that:
 
