@@ -55,7 +55,7 @@ name starts unowned. Creator records are not touched by reconciliation.
 | Relation                                  | Allows                                                                                                                      |
 | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | atespace `viewer`                         | Get and list actors, templates, tags and egress policies; get the atespace; use its templates and tags in other atespaces |
-| atespace `editor`                         | Also create, update, suspend, pause, resume, revert and delete actors; create and delete templates; create, update and delete tags; change egress policies |
+| atespace `editor`                         | Also create, update, suspend, pause, resume, revert and delete actors; reach actors' ports through the ingress gateway (`can_connect`); create and delete templates; create, update and delete tags; change egress policies |
 | atespace `owner`                          | Also delete the atespace                                                                                                    |
 | global `viewer`                           | View every atespace; list actors, templates, tags and atespaces across atespaces                                            |
 | global `owner`                            | Own every atespace; workers, worker assignments and actor credential minting                                                |
@@ -112,6 +112,34 @@ principal with no binding, such as any other pod's service account, can do
 nothing. `cmd/ateapi/internal/rpcauthz/testdata` holds a fuller example that
 the enforcement tests run.
 
+## Ingress
+
+The atenet router can authorize the clients of actors, not only callers of
+ate-api. With `--ingress-authorization=enforce` it takes each request's token
+from the first of `--ingress-token-headers` present (default
+`ate-authorization`; a `Bearer ` prefix is optional), asks ate-api's
+`CheckActorAccess` whether it authenticates and its principal has
+`can_connect` on the addressed actor (editor of its atespace), and only then
+resumes and routes to the actor. A request without a token that authenticates
+is answered 401, and one without access 403. `audit` logs `Ingress
+authorization would deny request (audit mode)` and forwards it anyway. Token
+headers, and any `--ingress-strip-headers`, are removed before the request
+reaches the actor, which could otherwise replay a client's credential.
+
+In-cluster clients send their own ServiceAccount token (the Kubernetes
+provider's audience) in `ate-authorization`. Behind Identity-Aware Proxy, put
+`x-goog-iap-jwt-assertion` first and strip the credential clients present to
+the proxy:
+
+```
+--ingress-authorization=enforce
+--ingress-token-headers=x-goog-iap-jwt-assertion,ate-authorization
+--ingress-strip-headers=proxy-authorization
+```
+
+Only global owners may call `CheckActorAccess`, since the answer reveals
+whether a token is valid.
+
 ## Rolling out
 
 Start with `mode: audit` and look for `Authorization would deny call (audit
@@ -128,7 +156,10 @@ in audit mode.
   node-scoped `can_mint_ateom_actor_credential` is not wired up, so atelet is
   trusted with every actor.
 - Listing across atespaces is all or nothing; there is no filtered list.
-- The router does not authorize ingress callers: anyone who can reach it can
-  reach an actor's ports. Actors must authenticate their own clients.
+- Unless the router enforces [ingress authorization](#ingress), anyone who
+  can reach it can reach an actor's ports, and actors must authenticate their
+  own clients. With it, a decision is cached per token and actor for
+  `--ingress-authorization-cache-ttl` (a minute), and an established
+  connection, such as a WebSocket, is not re-checked.
 - Every call is checked against PostgreSQL; revocation takes effect on the
   next call.

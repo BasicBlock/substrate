@@ -23,6 +23,12 @@ Router has several responsibilities:
   server so parked requests finish normally (`--drain-timeout`, derived from
   the parking budget), then writes a drain-complete marker that releases the
   dataplane container's `preStop` hook. See `drain.go` and `envoydrain.go`.
+* Optionally authorizes ingress clients (`--ingress-authorization`): before it
+  resumes an actor, the ingress handler asks ateapi's `CheckActorAccess`
+  whether the token the client sent may reach it (`can_connect`), caching the
+  answer briefly, and removes the token (and `--ingress-strip-headers`) before
+  forwarding. See `ingress/access.go` and
+  [docs/authorization.md](../../../../docs/authorization.md#ingress).
 * Authenticates actor identity on egress: on every CONNECT, the egress
   gateway's ext_proc handler re-verifies the actor's client certificate against
   the actor-identity CA, reads the `ActorIdentity` X.509 extension out of it,

@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/internal/version"
 )
 
@@ -57,6 +58,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to the kubeconfig file")
 	rootCmd.PersistentFlags().StringVar(&k8sContext, "context", "", "The name of the kubeconfig context to use")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "", "Manual override for the gRPC target (e.g., localhost:8080). If omitted, automatically port-forwards.")
+	rootCmd.PersistentFlags().StringVar(&ateclient.EndpointCAFile, "endpoint-ca-file", "", "With --endpoint: PEM CAs that verify the endpoint by its own name, or \"system\" for the system roots, instead of the cluster's ClusterTrustBundles. The endpoint is then reached with no Kubernetes access (for a gateway in front of ateapi), and --token-file is required.")
 	rootCmd.PersistentFlags().StringVar(&tokenFile, "token-file", "", "Path to a bearer token for ate-api authentication, or - to read it from stdin. Defaults to a Kubernetes ServiceAccount token.")
 	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "table", "Output format. One of: table|json|yaml")
 	rootCmd.PersistentFlags().BoolVar(&traceEnabled, "trace", false, "Enable tracing for the request")

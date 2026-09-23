@@ -22,6 +22,8 @@ Provider names and issuers must be unique. `issuer` must be an HTTPS URL and
 `audiences` must be non-empty; a token is accepted when any configured audience
 matches. `certificateAuthorityFile` and `discoveryTokenFile` are optional and
 are needed for OIDC discovery against some private Kubernetes API servers.
+`jwksURI` and `tokenHeader` serve an identity-asserting proxy; see
+[Identity-Aware Proxy](#identity-aware-proxy).
 
 `actorIdentityJWTProvider` identifies the provider allowed to call
 `ActorIdentity.MintJWT`.
@@ -80,6 +82,48 @@ Here `dev@example.com` is the principal `google:dev@example.com` in the groups
 `google` and `google/example`, and a token for
 `runtime@other-project.iam.gserviceaccount.com` or `someone@gmail.com` is
 rejected.
+
+## Identity-Aware Proxy
+
+Behind a proxy that asserts each caller's identity, ate-api can authenticate
+the proxy's assertion instead of a token the caller holds. Google Cloud's
+Identity-Aware Proxy (IAP) signs an ES256 JWT for each request it admits and
+sends it as `x-goog-iap-jwt-assertion`. Its issuer has no OIDC discovery
+document, so `jwksURI` names its keys, and `tokenHeader` the header:
+
+```yaml
+- name: iap
+  issuer: https://cloud.google.com/iap
+  audiences:
+  # The backend service behind the proxy: an assertion for another backend
+  # (another application behind IAP) is refused.
+  - /projects/123456789/global/backendServices/987654321
+  jwksURI: https://www.gstatic.com/iap/verify/public_key-jwk
+  tokenHeader: x-goog-iap-jwt-assertion
+  principalClaim: email
+  claimRules:
+  - name: staff
+    claims: {hd: example.com}
+```
+
+A request carrying a provider's `tokenHeader` is authenticated by that header
+alone; its `authorization` header, which may hold the credential the caller
+presented to the proxy, is ignored. The header is ordinary client input, so what
+authenticates the caller is the assertion's signature and audience, as for a
+bearer token. Name only the backends in front of this ate-api (and its ingress
+gateway, which presents assertions through `CheckActorAccess`) as audiences.
+
+`kubectl-ate` reaches ate-api through such a gateway with
+`--endpoint=<host>:443 --endpoint-ca-file=system --token-file=<token>`: the
+token authenticates to the proxy, and no Kubernetes access is needed.
+
+## Ingress clients
+
+The ingress gateway (the atenet router) can authorize the clients of actors as
+well: with `--ingress-authorization=enforce` it calls `CheckActorAccess` with
+the token each client presents (in the headers `--ingress-token-headers`
+names), which ate-api authenticates like a call's own token and authorizes
+against `can_connect` on the actor. See [Authorization](authorization.md#ingress).
 
 ## Google Cloud CLI tokens
 
