@@ -30,6 +30,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/oidcjwt"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/rpcauthz"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/atepg"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
@@ -73,6 +74,7 @@ var (
 	grpcServerCredBundle = pflag.String("grpc-server-cred-bundle", "", "File with the server TLS credential bundle.")
 
 	authenticationConfigFile = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
+	authorizationConfigFile  = pflag.String("authorization-config", "", "YAML file with the authorization mode and role bindings (docs/authorization.md). Empty disables authorization: every authenticated principal may call every RPC.")
 	postgresConnectionString = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
 	postgresSchema           = pflag.String("postgres-schema", "public", "PostgreSQL schema for Substrate tables. This overrides a search_path connection parameter.")
 
@@ -162,6 +164,7 @@ func main() {
 		defer closer.Close()
 	}
 
+	var authzSrv *authz.Server
 	if poolProvider, ok := persistence.(interface {
 		NewPool(context.Context) (*pgxpool.Pool, error)
 	}); ok {
@@ -169,11 +172,15 @@ func main() {
 		if err != nil {
 			serverboot.Fatal(ctx, "Failed to open dedicated PostgreSQL pool for OpenFGA", err)
 		}
-		authzSrv, err := authz.NewServer(shutdownCtx, authzPool)
+		authzSrv, err = authz.NewServer(shutdownCtx, authzPool)
 		if err != nil {
 			serverboot.Fatal(ctx, "Failed to initialize OpenFGA authorization server", err)
 		}
 		defer authzSrv.Close()
+	}
+	authorizer, err := newAuthorizer(shutdownCtx, authzSrv, authenticationConfig)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to initialize authorization", err)
 	}
 
 	clientset, ateClient, err := newKubeClients()
@@ -270,6 +277,18 @@ func main() {
 		serverboot.Fatal(ctx, "Invalid auth config", err)
 	}
 
+	unaryInterceptors := []grpc.UnaryServerInterceptor{ateapiauth.UnaryServerInterceptor(authCfg)}
+	streamInterceptors := []grpc.StreamServerInterceptor{ateapiauth.StreamServerInterceptor(authCfg)}
+	if authorizer != nil {
+		unaryInterceptors = append(unaryInterceptors, rpcauthz.UnaryServerInterceptor(authorizer))
+		streamInterceptors = append(streamInterceptors, rpcauthz.StreamServerInterceptor(authorizer))
+	}
+	unaryInterceptors = append(unaryInterceptors,
+		ateinterceptors.MaxDeadlineUnaryInterceptor(maxRPCDeadline),
+		ateinterceptors.ServerUnaryInterceptor,
+		ateinterceptors.RejectUnknownFieldsUnaryInterceptor,
+	)
+
 	mux := grpc.NewServer(
 		grpc.Creds(serverCreds),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -280,15 +299,8 @@ func main() {
 			MaxConnectionAge:      1 * time.Hour,
 			MaxConnectionAgeGrace: maxRPCDeadline + time.Minute,
 		}),
-		grpc.ChainUnaryInterceptor(
-			ateapiauth.UnaryServerInterceptor(authCfg),
-			ateinterceptors.MaxDeadlineUnaryInterceptor(maxRPCDeadline),
-			ateinterceptors.ServerUnaryInterceptor,
-			ateinterceptors.RejectUnknownFieldsUnaryInterceptor,
-		),
-		grpc.ChainStreamInterceptor(
-			ateapiauth.StreamServerInterceptor(authCfg),
-		),
+		grpc.ChainUnaryInterceptor(unaryInterceptors...),
+		grpc.ChainStreamInterceptor(streamInterceptors...),
 	)
 	reflection.Register(mux)
 	ateapipb.RegisterControlServer(mux, controlSrv)
@@ -308,6 +320,31 @@ func main() {
 	}
 	<-drainDone
 	slog.InfoContext(ctx, "Shutdown complete")
+}
+
+// newAuthorizer loads --authorization-config and reconciles its bindings.
+// It returns nil, disabling authorization, when the flag is unset.
+func newAuthorizer(ctx context.Context, srv *authz.Server, authn *ateapiauth.AuthenticationConfig) (*authz.Authorizer, error) {
+	if *authorizationConfigFile == "" {
+		slog.WarnContext(ctx, "Authorization is disabled: every authenticated principal may call every RPC. Set --authorization-config.")
+		return nil, nil
+	}
+	if srv == nil {
+		return nil, fmt.Errorf("--authorization-config needs the PostgreSQL store, which hosts OpenFGA")
+	}
+	cfg, err := authz.LoadConfig(*authorizationConfigFile)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(authn.GroupNames()); err != nil {
+		return nil, fmt.Errorf("invalid authorization config: %w", err)
+	}
+	authorizer, err := authz.NewAuthorizer(ctx, srv, cfg)
+	if err != nil {
+		return nil, err
+	}
+	slog.InfoContext(ctx, "Authorization enabled", slog.String("mode", string(cfg.Mode)))
+	return authorizer, nil
 }
 
 func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboot.Readiness) <-chan struct{} {
@@ -359,6 +396,7 @@ func logFlagValues(ctx context.Context) {
 		slog.String("grpc-listen-addr", *listenAddr),
 		slog.String("grpc-server-cred-bundle", *grpcServerCredBundle),
 		slog.String("authentication-config", *authenticationConfigFile),
+		slog.String("authorization-config", *authorizationConfigFile),
 		slog.String("postgres-connection-string", *postgresConnectionString),
 		slog.String("postgres-schema", *postgresSchema),
 		slog.String("actor-id-jwt-pool", *actorIDJWTPoolFile),
