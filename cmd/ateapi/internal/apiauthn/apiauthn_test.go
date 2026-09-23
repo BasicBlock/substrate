@@ -269,3 +269,75 @@ func TestBearerToken(t *testing.T) {
 // Build-time check.
 var _ grpc.UnaryServerInterceptor = UnaryServerInterceptor(ServerConfig{})
 var _ grpc.StreamServerInterceptor = StreamServerInterceptor(ServerConfig{})
+
+func TestJWTServerAuthenticatorTokenHeader(t *testing.T) {
+	// iss https://iap.example
+	const iapToken = "e30.eyJpc3MiOiJodHRwczovL2lhcC5leGFtcGxlIn0.aWFw"
+	auth := jwtServerAuthenticator{providers: []JWTProvider{
+		{Name: "google", Issuer: "https://issuer.example", Verify: func(_ context.Context, token string) (string, []string, error) {
+			if token != testGoodToken {
+				return "", nil, fmt.Errorf("bad token")
+			}
+			return "bearer@example.com", nil, nil
+		}},
+		{Name: "iap", Issuer: "https://iap.example", TokenHeader: "x-goog-iap-jwt-assertion", Verify: func(_ context.Context, token string) (string, []string, error) {
+			if token != iapToken {
+				return "", nil, fmt.Errorf("bad assertion")
+			}
+			return "asserted@example.com", []string{"staff"}, nil
+		}},
+	}}
+	cases := []struct {
+		name    string
+		md      metadata.MD
+		want    string
+		wantErr codes.Code
+	}{
+		{name: "header wins over bearer", md: metadata.Pairs("x-goog-iap-jwt-assertion", iapToken, "authorization", "Bearer "+testGoodToken), want: "iap:asserted@example.com"},
+		{name: "invalid header does not fall back", md: metadata.Pairs("x-goog-iap-jwt-assertion", testBadToken, "authorization", "Bearer "+testGoodToken), wantErr: codes.Unauthenticated},
+		{name: "bearer without header", md: metadata.Pairs("authorization", "Bearer "+testGoodToken), want: "google:bearer@example.com"},
+		// Either header is client input; what counts is the assertion's signature.
+		{name: "header token as a bearer token", md: metadata.Pairs("authorization", "Bearer "+iapToken), want: "iap:asserted@example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, err := auth.authenticate(metadata.NewIncomingContext(context.Background(), tc.md))
+			if tc.wantErr != codes.OK {
+				if status.Code(err) != tc.wantErr {
+					t.Fatalf("authenticate err = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := principal.FromContext(ctx)
+			if got.Provider+":"+got.ID != tc.want {
+				t.Fatalf("principal = %s:%s, want %s", got.Provider, got.ID, tc.want)
+			}
+		})
+	}
+}
+
+func TestServerConfigAuthenticate(t *testing.T) {
+	cfg := ServerConfig{JWTProviders: []JWTProvider{{Name: "test", Issuer: "https://issuer.example", Verify: func(_ context.Context, token string) (string, []string, error) {
+		if token != testGoodToken {
+			return "", nil, fmt.Errorf("bad token")
+		}
+		return "subject", []string{"rule"}, nil
+	}}}}
+	got, err := cfg.Authenticate(context.Background(), testGoodToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := principal.PrincipalInfo{ID: "subject", Kind: principal.KindJWT, Issuer: "https://issuer.example", Provider: "test", Groups: []string{"authenticated", "test", "test/rule"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("principal = %+v, want %+v", got, want)
+	}
+	if _, err := cfg.Authenticate(context.Background(), testBadToken); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("bad token err = %v, want Unauthenticated", err)
+	}
+	if _, err := cfg.Authenticate(context.Background(), "not-a-jwt"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("malformed token err = %v, want Unauthenticated", err)
+	}
+}

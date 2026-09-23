@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/actoraccess"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/apiauthn"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
@@ -356,7 +357,16 @@ func main() {
 		),
 	)
 	reflection.Register(mux)
-	ateapipb.RegisterControlServer(mux, controlSrv)
+	// CheckActorAccess's inner can_connect check only runs in enforce mode:
+	// without --authorization-config, or in audit mode, every authenticated
+	// principal may connect, matching every other RPC's behavior in those
+	// cases. A nil *authz.Authorizer must reach actoraccess as a nil
+	// interface (a non-nil interface holding a nil pointer is not nil).
+	var accessAuthorizer actoraccess.Authorizer
+	if authzMode == authz.ModeEnforce {
+		accessAuthorizer = authorizer
+	}
+	ateapipb.RegisterControlServer(mux, controlServer{RPCService: controlSrv, access: actoraccess.New(authCfg, accessAuthorizer)})
 	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence, controlSrv, ateletSPIFFEID, actorIDCAPool))
 
 	readiness := &serverboot.Readiness{}
@@ -373,6 +383,17 @@ func main() {
 	}
 	<-drainDone
 	slog.InfoContext(ctx, "Shutdown complete")
+}
+
+// controlServer adds CheckActorAccess, which needs ate-api's authentication
+// and authorization rather than the store, to the Control service.
+type controlServer struct {
+	*controlapi.RPCService
+	access *actoraccess.Checker
+}
+
+func (s controlServer) CheckActorAccess(ctx context.Context, req *ateapipb.CheckActorAccessRequest) (*ateapipb.CheckActorAccessResponse, error) {
+	return s.access.Check(ctx, req)
 }
 
 func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboot.Readiness) <-chan struct{} {
@@ -617,9 +638,13 @@ func buildJWTProviders(ctx context.Context, cfg *apiauthn.AuthenticationConfig) 
 			return apiauthn.ServerConfig{}, fmt.Errorf("initialize JWT provider %q: %w", providerCfg.Name, err)
 		}
 		verifier := oidcjwt.NewVerifier(providerCfg.Issuer, providerCfg.Audiences, httpClient)
+		if providerCfg.JWKSURI != "" {
+			verifier = oidcjwt.NewVerifierWithJWKS(providerCfg.Issuer, providerCfg.Audiences, providerCfg.JWKSURI, httpClient)
+		}
 		serverCfg.JWTProviders = append(serverCfg.JWTProviders, apiauthn.JWTProvider{
-			Name:   providerCfg.Name,
-			Issuer: providerCfg.Issuer,
+			Name:        providerCfg.Name,
+			Issuer:      providerCfg.Issuer,
+			TokenHeader: providerCfg.TokenHeader,
 			Verify: func(ctx context.Context, bearer string) (string, []string, error) {
 				claims, err := verifier.Verify(ctx, bearer, time.Now())
 				if err != nil {

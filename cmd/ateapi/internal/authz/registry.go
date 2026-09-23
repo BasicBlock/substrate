@@ -247,6 +247,10 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapipb.Control_RevertActor_FullMethodName: rule(actorRule[*ateapipb.RevertActorRequest](RelationCanRevert)),
 	ateapipb.Control_DeleteActor_FullMethodName: rule(actorRule[*ateapipb.DeleteActorRequest](RelationCanDelete)),
 
+	// The ingress gateway asks on its clients' behalf; the answer checks the
+	// client's can_connect, and would otherwise reveal whether a token is valid.
+	ateapipb.Control_CheckActorAccess_FullMethodName: rule(globalRule[*ateapipb.CheckActorAccessRequest](RoleOwner)),
+
 	ateapipb.Control_GetActorEgressPolicy_FullMethodName:    rule(actorRule[*ateapipb.GetActorEgressPolicyRequest](RelationCanGet)),
 	ateapipb.Control_CreateActorEgressPolicy_FullMethodName: rule(actorRule[*ateapipb.CreateActorEgressPolicyRequest](RelationCanUpdate)),
 	ateapipb.Control_UpdateActorEgressPolicy_FullMethodName: rule(actorRule[*ateapipb.UpdateActorEgressPolicyRequest](RelationCanUpdate)),
