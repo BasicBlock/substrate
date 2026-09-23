@@ -79,6 +79,11 @@ class ControlStub:
                 request_serializer=ateapi__pb2.ResumeActorRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.ResumeActorResponse.FromString,
                 _registered_method=True)
+        self.CheckActorAccess = channel.unary_unary(
+                '/ateapi.Control/CheckActorAccess',
+                request_serializer=ateapi__pb2.CheckActorAccessRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.CheckActorAccessResponse.FromString,
+                _registered_method=True)
         self.RevertActor = channel.unary_unary(
                 '/ateapi.Control/RevertActor',
                 request_serializer=ateapi__pb2.RevertActorRequest.SerializeToString,
@@ -269,6 +274,17 @@ class ControlServicer:
 
     def ResumeActor(self, request, context):
         """Resume an actor from its latest snapshot.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CheckActorAccess(self, request, context):
+        """Report whether the bearer of a token may reach an actor's ports through
+        the ingress gateway: the token authenticates as it would on a call to this
+        API, and the principal needs can_connect on the actor (editor of its
+        atespace). The gateway asks before it resumes or routes to the actor. It
+        answers without checking that the actor exists.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -524,6 +540,11 @@ def add_ControlServicer_to_server(servicer, server):
                     servicer.ResumeActor,
                     request_deserializer=ateapi__pb2.ResumeActorRequest.FromString,
                     response_serializer=ateapi__pb2.ResumeActorResponse.SerializeToString,
+            ),
+            'CheckActorAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.CheckActorAccess,
+                    request_deserializer=ateapi__pb2.CheckActorAccessRequest.FromString,
+                    response_serializer=ateapi__pb2.CheckActorAccessResponse.SerializeToString,
             ),
             'RevertActor': grpc.unary_unary_rpc_method_handler(
                     servicer.RevertActor,
@@ -834,6 +855,33 @@ class Control:
             '/ateapi.Control/ResumeActor',
             ateapi__pb2.ResumeActorRequest.SerializeToString,
             ateapi__pb2.ResumeActorResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CheckActorAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/CheckActorAccess',
+            ateapi__pb2.CheckActorAccessRequest.SerializeToString,
+            ateapi__pb2.CheckActorAccessResponse.FromString,
             options,
             channel_credentials,
             insecure,

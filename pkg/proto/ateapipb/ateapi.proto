@@ -43,6 +43,13 @@ service Control {
   // Resume an actor from its latest snapshot.
   rpc ResumeActor(ResumeActorRequest) returns (ResumeActorResponse) {}
 
+  // Report whether the bearer of a token may reach an actor's ports through
+  // the ingress gateway: the token authenticates as it would on a call to this
+  // API, and the principal needs can_connect on the actor (editor of its
+  // atespace). The gateway asks before it resumes or routes to the actor. It
+  // answers without checking that the actor exists.
+  rpc CheckActorAccess(CheckActorAccessRequest) returns (CheckActorAccessResponse) {}
+
   // Revert an actor to SUSPENDED state.
   // Only crashed, running or paused actors can be reverted.
   rpc RevertActor(RevertActorRequest) returns (RevertActorResponse) {}
@@ -1393,6 +1400,28 @@ message ResumeActorRequest {
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
+}
+
+message CheckActorAccessRequest {
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
+  ObjectRef actor = 1;
+
+  // The client's token, a JWT, as the gateway received it.
+  // +k8s:required
+  string token = 2;
+}
+
+message CheckActorAccessResponse {
+  // True when the token authenticates and its principal may connect.
+  bool allowed = 1;
+
+  // The authenticated principal as "<provider>:<id>", empty when the token
+  // did not authenticate.
+  string principal = 2;
+
+  // Why access is denied, for the gateway's logs; empty when allowed.
+  string reason = 3;
 }
 
 message ResumeActorResponse {

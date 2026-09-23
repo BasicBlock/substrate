@@ -39,6 +39,7 @@ const (
 	Control_SuspendActor_FullMethodName               = "/ateapi.Control/SuspendActor"
 	Control_PauseActor_FullMethodName                 = "/ateapi.Control/PauseActor"
 	Control_ResumeActor_FullMethodName                = "/ateapi.Control/ResumeActor"
+	Control_CheckActorAccess_FullMethodName           = "/ateapi.Control/CheckActorAccess"
 	Control_RevertActor_FullMethodName                = "/ateapi.Control/RevertActor"
 	Control_DeleteActor_FullMethodName                = "/ateapi.Control/DeleteActor"
 	Control_GetActorEgressPolicy_FullMethodName       = "/ateapi.Control/GetActorEgressPolicy"
@@ -90,6 +91,12 @@ type ControlClient interface {
 	PauseActor(ctx context.Context, in *PauseActorRequest, opts ...grpc.CallOption) (*PauseActorResponse, error)
 	// Resume an actor from its latest snapshot.
 	ResumeActor(ctx context.Context, in *ResumeActorRequest, opts ...grpc.CallOption) (*ResumeActorResponse, error)
+	// Report whether the bearer of a token may reach an actor's ports through
+	// the ingress gateway: the token authenticates as it would on a call to this
+	// API, and the principal needs can_connect on the actor (editor of its
+	// atespace). The gateway asks before it resumes or routes to the actor. It
+	// answers without checking that the actor exists.
+	CheckActorAccess(ctx context.Context, in *CheckActorAccessRequest, opts ...grpc.CallOption) (*CheckActorAccessResponse, error)
 	// Revert an actor to SUSPENDED state.
 	// Only crashed, running or paused actors can be reverted.
 	RevertActor(ctx context.Context, in *RevertActorRequest, opts ...grpc.CallOption) (*RevertActorResponse, error)
@@ -227,6 +234,16 @@ func (c *controlClient) ResumeActor(ctx context.Context, in *ResumeActorRequest,
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResumeActorResponse)
 	err := c.cc.Invoke(ctx, Control_ResumeActor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) CheckActorAccess(ctx context.Context, in *CheckActorAccessRequest, opts ...grpc.CallOption) (*CheckActorAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckActorAccessResponse)
+	err := c.cc.Invoke(ctx, Control_CheckActorAccess_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -543,6 +560,12 @@ type ControlServer interface {
 	PauseActor(context.Context, *PauseActorRequest) (*PauseActorResponse, error)
 	// Resume an actor from its latest snapshot.
 	ResumeActor(context.Context, *ResumeActorRequest) (*ResumeActorResponse, error)
+	// Report whether the bearer of a token may reach an actor's ports through
+	// the ingress gateway: the token authenticates as it would on a call to this
+	// API, and the principal needs can_connect on the actor (editor of its
+	// atespace). The gateway asks before it resumes or routes to the actor. It
+	// answers without checking that the actor exists.
+	CheckActorAccess(context.Context, *CheckActorAccessRequest) (*CheckActorAccessResponse, error)
 	// Revert an actor to SUSPENDED state.
 	// Only crashed, running or paused actors can be reverted.
 	RevertActor(context.Context, *RevertActorRequest) (*RevertActorResponse, error)
@@ -643,6 +666,9 @@ func (UnimplementedControlServer) PauseActor(context.Context, *PauseActorRequest
 }
 func (UnimplementedControlServer) ResumeActor(context.Context, *ResumeActorRequest) (*ResumeActorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResumeActor not implemented")
+}
+func (UnimplementedControlServer) CheckActorAccess(context.Context, *CheckActorAccessRequest) (*CheckActorAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckActorAccess not implemented")
 }
 func (UnimplementedControlServer) RevertActor(context.Context, *RevertActorRequest) (*RevertActorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RevertActor not implemented")
@@ -856,6 +882,24 @@ func _Control_ResumeActor_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlServer).ResumeActor(ctx, req.(*ResumeActorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_CheckActorAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckActorAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).CheckActorAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_CheckActorAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).CheckActorAccess(ctx, req.(*CheckActorAccessRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1412,6 +1456,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResumeActor",
 			Handler:    _Control_ResumeActor_Handler,
+		},
+		{
+			MethodName: "CheckActorAccess",
+			Handler:    _Control_CheckActorAccess_Handler,
 		},
 		{
 			MethodName: "RevertActor",

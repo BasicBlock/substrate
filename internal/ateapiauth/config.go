@@ -40,6 +40,18 @@ type JWTProviderConfig struct {
 	CertificateAuthorityFile string   `json:"certificateAuthorityFile,omitempty"`
 	DiscoveryTokenFile       string   `json:"discoveryTokenFile,omitempty"`
 
+	// JWKSURI, when set, is the HTTPS URL of the issuer's signing keys, for an
+	// issuer that publishes no OIDC discovery document (Identity-Aware Proxy
+	// publishes https://www.gstatic.com/iap/verify/public_key-jwk).
+	JWKSURI string `json:"jwksURI,omitempty"`
+
+	// TokenHeader, when set, names the request header that carries this
+	// provider's tokens as a bare JWT, in place of "authorization: Bearer".
+	// A proxy in front of ate-api that asserts the caller's identity sets it,
+	// as Identity-Aware Proxy sets x-goog-iap-jwt-assertion. A request with
+	// the header is authenticated by it alone.
+	TokenHeader string `json:"tokenHeader,omitempty"`
+
 	// PrincipalClaim names the string claim that identifies the principal:
 	// "sub" when empty, or for example "email" for Google identity tokens,
 	// whose subject is an opaque number.
@@ -193,6 +205,7 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 
 	names := make(map[string]bool, len(cfg.JWTProviders))
 	issuers := make(map[string]bool, len(cfg.JWTProviders))
+	headers := map[string]bool{}
 	for i, p := range cfg.JWTProviders {
 		field := fmt.Sprintf("jwtProviders[%d]", i)
 		if p.Name == "" {
@@ -217,6 +230,20 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 		issuers[p.Issuer] = true
 		if len(p.Audiences) == 0 {
 			return fmt.Errorf("%s.audiences must contain at least one audience", field)
+		}
+		if p.JWKSURI != "" {
+			if u, err := url.Parse(p.JWKSURI); err != nil || u.Scheme != "https" || u.Host == "" {
+				return fmt.Errorf("%s.jwksURI must be an HTTPS URL", field)
+			}
+		}
+		if p.TokenHeader != "" {
+			if p.TokenHeader != strings.ToLower(p.TokenHeader) || !validHeaderName(p.TokenHeader) || p.TokenHeader == "authorization" || strings.HasPrefix(p.TokenHeader, "grpc-") {
+				return fmt.Errorf("%s.tokenHeader %q must be a lowercase header name other than authorization and grpc-*", field, p.TokenHeader)
+			}
+			if headers[p.TokenHeader] {
+				return fmt.Errorf("%s.tokenHeader %q is used by another provider", field, p.TokenHeader)
+			}
+			headers[p.TokenHeader] = true
 		}
 		for _, audience := range p.Audiences {
 			if audience == "" {
@@ -248,4 +275,18 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 		return fmt.Errorf("actorIdentityJWTProvider %q does not name a JWT provider", cfg.ActorIdentityJWTProvider)
 	}
 	return nil
+}
+
+// validHeaderName reports whether name is an HTTP header field name (an RFC
+// 9110 token).
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", c)) {
+			return false
+		}
+	}
+	return true
 }

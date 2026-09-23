@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/actoraccess"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/oidcjwt"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/rpcauthz"
@@ -303,7 +304,12 @@ func main() {
 		grpc.ChainStreamInterceptor(streamInterceptors...),
 	)
 	reflection.Register(mux)
-	ateapipb.RegisterControlServer(mux, controlSrv)
+	// A nil *authz.Authorizer must reach actoraccess as a nil interface.
+	var accessAuthorizer actoraccess.Authorizer
+	if authorizer != nil {
+		accessAuthorizer = authorizer
+	}
+	ateapipb.RegisterControlServer(mux, controlServer{RPCService: controlSrv, access: actoraccess.New(authCfg, accessAuthorizer)})
 	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence))
 
 	readiness := &serverboot.Readiness{}
@@ -320,6 +326,17 @@ func main() {
 	}
 	<-drainDone
 	slog.InfoContext(ctx, "Shutdown complete")
+}
+
+// controlServer adds CheckActorAccess, which needs ate-api's authentication
+// and authorization rather than the store, to the Control service.
+type controlServer struct {
+	*controlapi.RPCService
+	access *actoraccess.Checker
+}
+
+func (s controlServer) CheckActorAccess(ctx context.Context, req *ateapipb.CheckActorAccessRequest) (*ateapipb.CheckActorAccessResponse, error) {
+	return s.access.Check(ctx, req)
 }
 
 // newAuthorizer loads --authorization-config and reconciles its bindings.
@@ -536,9 +553,13 @@ func buildJWTProviders(ctx context.Context, cfg *ateapiauth.AuthenticationConfig
 			return ateapiauth.ServerConfig{}, "", fmt.Errorf("initialize JWT provider %q: %w", providerCfg.Name, err)
 		}
 		verifier := oidcjwt.NewVerifier(providerCfg.Issuer, providerCfg.Audiences, httpClient)
+		if providerCfg.JWKSURI != "" {
+			verifier = oidcjwt.NewVerifierWithJWKS(providerCfg.Issuer, providerCfg.Audiences, providerCfg.JWKSURI, httpClient)
+		}
 		serverCfg.JWTProviders = append(serverCfg.JWTProviders, ateapiauth.JWTProvider{
-			Name:   providerCfg.Name,
-			Issuer: providerCfg.Issuer,
+			Name:        providerCfg.Name,
+			Issuer:      providerCfg.Issuer,
+			TokenHeader: providerCfg.TokenHeader,
 			Verify: func(ctx context.Context, bearer string) (string, []string, error) {
 				claims, err := verifier.Verify(ctx, bearer, time.Now())
 				if err != nil {

@@ -15,8 +15,10 @@
 // Package ateapiauth authenticates clients of the ateapi gRPC server, and
 // provides a matching client dial helper. The server interceptor takes
 // identity from the transport-layer mTLS credentials when the client
-// presented a certificate, and otherwise requires an authorization
-// header `Bearer <JWT Token>`. Requests with no credentials are rejected.
+// presented a certificate, then from a JWT provider's token header (the
+// identity a proxy such as Identity-Aware Proxy asserts), and otherwise
+// requires an authorization header `Bearer <JWT Token>`. Requests with no
+// credentials are rejected.
 package ateapiauth
 
 import (
@@ -49,6 +51,9 @@ func ValidateServerConfig(cfg ServerConfig) error {
 			return fmt.Errorf("duplicate JWT provider issuer %q", provider.Issuer)
 		}
 		issuers[provider.Issuer] = true
+		if provider.TokenHeader == "authorization" {
+			return fmt.Errorf("JWT provider %q cannot read its tokens from authorization", provider.Name)
+		}
 	}
 	return nil
 }
@@ -57,6 +62,9 @@ func ValidateServerConfig(cfg ServerConfig) error {
 type JWTProvider struct {
 	Name   string
 	Issuer string
+	// TokenHeader, when set, is the metadata key that carries this provider's
+	// tokens as a bare JWT; a request with it is authenticated by it alone.
+	TokenHeader string
 	// Verify returns the principal a valid token identifies and the names of
 	// the claim rules it satisfies.
 	Verify func(context.Context, string) (id string, rules []string, err error)
@@ -168,37 +176,71 @@ type jwtServerAuthenticator struct {
 }
 
 func (a jwtServerAuthenticator) authenticate(ctx context.Context) (context.Context, error) {
+	// A header a proxy asserts the caller's identity in (x-goog-iap-jwt-assertion)
+	// takes precedence over the bearer token the caller passed through it.
+	md, _ := metadata.FromIncomingContext(ctx)
+	for _, provider := range a.providers {
+		if provider.TokenHeader == "" {
+			continue
+		}
+		if values := md.Get(provider.TokenHeader); len(values) > 0 {
+			p, err := verify(ctx, provider, strings.TrimSpace(values[0]))
+			if err != nil {
+				return nil, err
+			}
+			return principal.InjectContext(ctx, p), nil
+		}
+	}
 	bearer, ok := bearerToken(ctx)
 	if !ok {
 		return nil, status.Error(codes.Unauthenticated, "missing bearer token")
 	}
-	issuer, err := unverifiedIssuer(bearer)
+	p, err := a.verifyToken(ctx, bearer)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "invalid bearer token")
+		return nil, err
+	}
+	return principal.InjectContext(ctx, p), nil
+}
+
+// verifyToken authenticates a token with the provider for its issuer.
+func (a jwtServerAuthenticator) verifyToken(ctx context.Context, token string) (principal.PrincipalInfo, error) {
+	issuer, err := unverifiedIssuer(token)
+	if err != nil {
+		return principal.PrincipalInfo{}, status.Error(codes.Unauthenticated, "invalid bearer token")
 	}
 	for _, provider := range a.providers {
-		if provider.Issuer != issuer {
-			continue
+		if provider.Issuer == issuer {
+			return verify(ctx, provider, token)
 		}
-		id, rules, err := provider.Verify(ctx, bearer)
-		if err != nil {
-			slog.DebugContext(ctx, "JWT verification failed", slog.String("provider", provider.Name), slog.Any("err", err))
-			return nil, status.Error(codes.Unauthenticated, "invalid bearer token")
-		}
-		groups := []string{principal.GroupAuthenticated, provider.Name}
-		for _, rule := range rules {
-			groups = append(groups, provider.Name+"/"+rule)
-		}
-		return principal.InjectContext(ctx, principal.PrincipalInfo{
-			ID:       id,
-			Kind:     principal.KindJWT,
-			Issuer:   provider.Issuer,
-			Provider: provider.Name,
-			Groups:   groups,
-		}), nil
 	}
 	slog.DebugContext(ctx, "No JWT provider matched token issuer", slog.String("issuer", issuer))
-	return nil, status.Errorf(codes.Unauthenticated, "token issuer %q not trusted", issuer)
+	return principal.PrincipalInfo{}, status.Errorf(codes.Unauthenticated, "token issuer %q not trusted", issuer)
+}
+
+func verify(ctx context.Context, provider JWTProvider, token string) (principal.PrincipalInfo, error) {
+	id, rules, err := provider.Verify(ctx, token)
+	if err != nil {
+		slog.DebugContext(ctx, "JWT verification failed", slog.String("provider", provider.Name), slog.Any("err", err))
+		return principal.PrincipalInfo{}, status.Error(codes.Unauthenticated, "invalid bearer token")
+	}
+	groups := []string{principal.GroupAuthenticated, provider.Name}
+	for _, rule := range rules {
+		groups = append(groups, provider.Name+"/"+rule)
+	}
+	return principal.PrincipalInfo{
+		ID:       id,
+		Kind:     principal.KindJWT,
+		Issuer:   provider.Issuer,
+		Provider: provider.Name,
+		Groups:   groups,
+	}, nil
+}
+
+// Authenticate returns the principal a token identifies, as a call bearing it
+// would be authenticated. The ingress gateway presents its clients' tokens
+// through CheckActorAccess.
+func (cfg ServerConfig) Authenticate(ctx context.Context, token string) (principal.PrincipalInfo, error) {
+	return jwtServerAuthenticator{providers: cfg.JWTProviders}.verifyToken(ctx, token)
 }
 
 func unverifiedIssuer(token string) (string, error) {

@@ -84,6 +84,15 @@ func TestValidateAuthenticationConfig(t *testing.T) {
 		{name: "insecure issuer", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].Issuer = "http://issuer.example" }},
 		{name: "no audiences", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].Audiences = nil }},
 		{name: "duplicate provider", mutate: func(c *AuthenticationConfig) { c.JWTProviders = append(c.JWTProviders, c.JWTProviders[0]) }},
+		{name: "insecure JWKS URI", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].JWKSURI = "http://keys.example/jwk" }},
+		{name: "token header authorization", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].TokenHeader = "authorization" }},
+		{name: "token header uppercase", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].TokenHeader = "X-Goog-Iap-Jwt-Assertion" }},
+		{name: "token header grpc", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].TokenHeader = "grpc-status" }},
+		{name: "token header not a token", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].TokenHeader = "x assertion" }},
+		{name: "shared token header", mutate: func(c *AuthenticationConfig) {
+			c.JWTProviders[0].TokenHeader = "x-assertion"
+			c.JWTProviders = append(c.JWTProviders, JWTProviderConfig{Name: "other", Issuer: "https://other.example", Audiences: []string{"a"}, TokenHeader: "x-assertion"})
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,6 +102,28 @@ func TestValidateAuthenticationConfig(t *testing.T) {
 				t.Fatal("ValidateAuthenticationConfig() succeeded, want error")
 			}
 		})
+	}
+}
+
+func TestValidateAuthenticationConfigIAP(t *testing.T) {
+	cfg := loadConfig(t, `
+actorIdentityJWTProvider: kubernetes
+jwtProviders:
+- name: kubernetes
+  issuer: https://kubernetes.default.svc
+  audiences: [api.ate-system.svc]
+- name: iap
+  issuer: https://cloud.google.com/iap
+  audiences: [/projects/123/global/backendServices/456]
+  jwksURI: https://www.gstatic.com/iap/verify/public_key-jwk
+  tokenHeader: x-goog-iap-jwt-assertion
+  principalClaim: email
+`)
+	if err := ValidateAuthenticationConfig(cfg); err != nil {
+		t.Fatalf("ValidateAuthenticationConfig() = %v", err)
+	}
+	if got := cfg.JWTProviders[1]; got.JWKSURI != "https://www.gstatic.com/iap/verify/public_key-jwk" || got.TokenHeader != "x-goog-iap-jwt-assertion" {
+		t.Fatalf("provider = %+v", got)
 	}
 }
 

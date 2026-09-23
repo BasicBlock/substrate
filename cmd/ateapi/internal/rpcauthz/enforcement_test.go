@@ -161,6 +161,9 @@ func TestEnforcementExample(t *testing.T) {
 			{controller, ateapipb.Control_SuspendActor_FullMethodName, &ateapipb.SuspendActorRequest{Actor: ref("dev-alice", "x")}, allow},
 			{router, ateapipb.Control_ResumeActor_FullMethodName, &ateapipb.ResumeActorRequest{Actor: ref("eve-demo", "x")}, allow},
 			{router, ateapipb.Control_GetActor_FullMethodName, &ateapipb.GetActorRequest{Actor: ref("dev-bob", "x")}, allow},
+			{router, ateapipb.Control_CheckActorAccess_FullMethodName, &ateapipb.CheckActorAccessRequest{Actor: ref("dev-bob", "x"), Token: "t"}, allow},
+			// Only the gateway may ask: the answer would reveal whether a token is valid.
+			{alice, ateapipb.Control_CheckActorAccess_FullMethodName, &ateapipb.CheckActorAccessRequest{Actor: ref("dev-alice", "x"), Token: "t"}, deny},
 			{atelet, ateapipb.Control_ListWorkers_FullMethodName, &ateapipb.ListWorkersRequest{}, allow},
 			{atelet, ateapipb.Control_ListActorTemplates_FullMethodName, &ateapipb.ListActorTemplatesRequest{}, allow},
 			{atelet, ateapipb.Control_MintActorCertificate_FullMethodName, &ateapipb.MintActorCertificateRequest{Actor: ref("dev-alice", "x")}, allow},

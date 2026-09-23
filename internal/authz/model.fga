@@ -108,6 +108,8 @@ type actor
 
     # Data Plane Ingress: Routers (or editors) can resume
     define can_resume: [user] or editor from parent_atespace
+    # Reach the actor's ports through the ingress gateway (CheckActorAccess)
+    define can_connect: [user] or editor from parent_atespace
 
     # Lifecycle Operations
     define can_suspend: [user] or editor from parent_atespace
