@@ -137,6 +137,27 @@ func TestVerifierReturnsKubernetesClaims(t *testing.T) {
 	}
 }
 
+func TestVerifierReturnsRawClaims(t *testing.T) {
+	ti := newTestIssuer(t)
+	key := testRSAKey(t)
+	ti.addRSA("key", &key.PublicKey)
+	claims := validClaims(ti.issuer())
+	claims["email"] = "dev@example.com"
+	claims["email_verified"] = true
+	token := mintJWT(t, "RS256", "key", key, claims)
+
+	got, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(t.Context(), token, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Raw["email"] != "dev@example.com" || got.Raw["email_verified"] != true || got.Raw["sub"] != got.Subject {
+		t.Fatalf("Raw claims = %+v", got.Raw)
+	}
+	if _, ok := got.Raw["exp"].(json.Number); !ok {
+		t.Fatalf("Raw exp = %T, want json.Number", got.Raw["exp"])
+	}
+}
+
 func TestVerifierCachesAndRefreshesKeys(t *testing.T) {
 	ti := newTestIssuer(t)
 	key1 := testRSAKey(t)
