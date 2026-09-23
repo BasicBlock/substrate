@@ -206,17 +206,22 @@ Each warning comes back at the step where the mistake becomes possible.
 > **Do not edit a serving worker pool, and do not scale it down.** The
 > controller would roll the pool's Deployment straight through live
 > actors. A deleted worker pod does go through the eviction path: the
-> controller suspends its actor, and the worker holds `SIGTERM` for up
-> to `--drain-suspend-wait` (2 minutes) while that suspend starts, so
-> the actor saves its state and resumes elsewhere. An actor that is not
-> suspended in that window has `SIGTERM` forwarded into its containers,
-> and the control plane keeps accepting a suspend for the rest of 30
-> minutes. Handling `SIGTERM` by exiting cleanly is not enough on its
-> own; the suspend has to reach the control plane and finish. An actor
-> still awake when the window closes moves to `ACTOR_STATE_CRASHED`,
-> which is terminal: `resume` and `suspend` are both refused, there is
-> no recover verb, and the snapshot the actor still holds cannot be used
-> to start it. It has to be deleted and recreated, losing its state.
+> controller suspends its actor — retrying a failed suspend with backoff
+> until it succeeds, the actor no longer needs saving there, or the pod
+> is gone — and the worker holds `SIGTERM` for up to `--drain-suspend-wait`
+> (5 minutes) while that suspend starts, so the actor saves its state and
+> resumes elsewhere. An actor that is not suspended in that window has
+> `SIGTERM` forwarded into its containers, and the control plane keeps
+> accepting a suspend for the rest of 30 minutes. Handling `SIGTERM` by
+> exiting cleanly is not enough on its own; the suspend has to reach the
+> control plane and finish. An actor still awake when the window closes
+> moves to `ACTOR_STATE_CRASHED`, which is terminal for `resume` and
+> `suspend` — both are refused — but not for the actor itself:
+> `kubectl ate revert actor` reverts a crashed actor to
+> `ACTOR_STATE_SUSPENDED` from its last external snapshot, discarding the
+> execution since then, and a later `resume` restores it from there. Scaling
+> a serving pool down removes pods the same way its rollout does, going
+> through the same suspend-then-evict path rather than skipping it.
 > (Step 4 clones the pool; it never edits it.)
 
 > [!WARNING]
