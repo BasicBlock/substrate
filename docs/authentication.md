@@ -24,11 +24,14 @@ matches. `certificateAuthorityFile` and `discoveryTokenFile` are optional and
 are needed for OIDC discovery against some private Kubernetes API servers.
 
 `actorIdentityJWTProvider` identifies the provider allowed to call
-`ActorIdentity.MintJWT`. Other authenticated providers can call every RPC.
-Authorization and RBAC are not implemented yet, so only configure providers
-whose users should have full control of the entire control plane: every
-atespace, actor, actor template, egress policy, snapshot and worker in the
-cluster.
+`ActorIdentity.MintJWT`.
+
+Authentication only establishes who a caller is. Unless
+[authorization](authorization.md) is enforced, every authenticated principal
+controls the entire control plane: every atespace, actor, actor template,
+egress policy, snapshot and worker in the cluster. For the Kubernetes provider
+that is every pod, since any pod can project a service account token for the
+configured audience.
 
 ## Principals
 
@@ -41,10 +44,10 @@ Every authenticated caller is a principal named by its provider and an ID:
 | Other JWT                      | the provider's `name`        | the claim named by `principalClaim` (default `sub`)                         |
 
 A principal also belongs to groups: `authenticated`, its provider's name, and
-`<provider>/<rule>` for each named claim rule it satisfies. Authorization
-bindings name principals as `<provider>:<id>` and groups as `group:<name>`.
-Provider names therefore may not
-contain `:`, `/`, `#`, `%` or spaces, and `mtls` and `authenticated` are
+`<provider>/<rule>` for each named claim rule it satisfies.
+[Authorization](authorization.md) bindings name principals as
+`<provider>:<id>` and groups as `group:<name>`. Provider names therefore may
+not contain `:`, `/`, `#`, `%` or spaces, and `mtls` and `authenticated` are
 reserved.
 
 ### Claim rules
