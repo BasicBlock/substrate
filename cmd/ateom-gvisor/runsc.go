@@ -42,6 +42,9 @@ type runsc struct {
 	size sizing.SandboxSize
 	// durableVolumes are the durable-dir volume names declared to the sandbox.
 	durableVolumes []string
+	// cpuFeatures, when non-empty, levels the sandbox's guest CPUID (see
+	// ocispec.GVisorOptions.CPUFeatures).
+	cpuFeatures []string
 }
 
 // durableVolumeNames returns the sorted, deduplicated durable-dir volume names
@@ -69,6 +72,7 @@ func (r *runsc) shapeSpec(containerName string) error {
 		ContainerName:  containerName,
 		DurableVolumes: r.durableVolumes,
 		Size:           r.size,
+		CPUFeatures:    r.cpuFeatures,
 	})
 	return ocispec.Save(bundle, spec)
 }

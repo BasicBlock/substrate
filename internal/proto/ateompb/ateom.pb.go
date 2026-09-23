@@ -360,8 +360,13 @@ type RunWorkloadRequest struct {
 	// sizes the sandbox to these (cgroup caps via the OCI spec, and for the
 	// micro-VM the VM's vCPU count and memory). Zero means "unset": keep the
 	// runtime default (unlimited for gVisor, ateom's own default for the micro-VM).
-	CpuMilli      int64 `protobuf:"varint,11,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
-	MemoryBytes   int64 `protobuf:"varint,12,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	CpuMilli    int64 `protobuf:"varint,11,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
+	MemoryBytes int64 `protobuf:"varint,12,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	// cpu_features, when non-empty, levels the gVisor sandbox's guest CPUID to
+	// the intersection of the host's CPU features and this list, via runsc's
+	// dev.gvisor.internal.cpufeatures OCI annotation (ignored by the micro-VM
+	// runtime). Empty keeps the raw host feature set. x86_64 (amd64) only.
+	CpuFeatures   []string `protobuf:"bytes,13,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -471,6 +476,13 @@ func (x *RunWorkloadRequest) GetMemoryBytes() int64 {
 		return x.MemoryBytes
 	}
 	return 0
+}
+
+func (x *RunWorkloadRequest) GetCpuFeatures() []string {
+	if x != nil {
+		return x.CpuFeatures
+	}
+	return nil
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -1229,8 +1241,17 @@ type RestoreWorkloadRequest struct {
 	// (re)size the sandbox on a DATA-scope restore (fresh guest container). On a
 	// FULL micro-VM restore the size baked into the snapshot is authoritative and
 	// these are ignored. Zero means "unset": keep the runtime default.
-	CpuMilli      int64 `protobuf:"varint,14,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
-	MemoryBytes   int64 `protobuf:"varint,15,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	CpuMilli    int64 `protobuf:"varint,14,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
+	MemoryBytes int64 `protobuf:"varint,15,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	// cpu_features, when non-empty, levels the gVisor sandbox's guest CPUID to
+	// the intersection of the host's CPU features and this list, via runsc's
+	// dev.gvisor.internal.cpufeatures OCI annotation (ignored by the micro-VM
+	// runtime). Empty keeps the raw host feature set. x86_64 (amd64) only.
+	// Reapplied on restore for consistency with the create path; gVisor itself
+	// only consults the annotation at initial sandbox boot -- what a restore
+	// actually requires of the host is the feature set already recorded in the
+	// checkpoint image, not this field.
+	CpuFeatures   []string `protobuf:"bytes,16,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1361,6 +1382,13 @@ func (x *RestoreWorkloadRequest) GetMemoryBytes() int64 {
 		return x.MemoryBytes
 	}
 	return 0
+}
+
+func (x *RestoreWorkloadRequest) GetCpuFeatures() []string {
+	if x != nil {
+		return x.CpuFeatures
+	}
+	return nil
 }
 
 type RestoreWorkloadResponse struct {
@@ -1760,7 +1788,7 @@ const file_ateom_proto_rawDesc = "" +
 	"\n" +
 	"runsc_path\x18\x06 \x01(\tR\trunscPath\x12'\n" +
 	"\x04spec\x18\a \x01(\v2\x13.ateom.WorkloadSpecR\x04spec\"\x1b\n" +
-	"\x19TerminateWorkloadResponse\"\xd9\x04\n" +
+	"\x19TerminateWorkloadResponse\"\xfc\x04\n" +
 	"\x12RunWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -1775,7 +1803,8 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0eegress_gateway\x18\n" +
 	" \x01(\v2\x14.ateom.EgressGatewayH\x00R\regressGateway\x88\x01\x01\x12\x1b\n" +
 	"\tcpu_milli\x18\v \x01(\x03R\bcpuMilli\x12!\n" +
-	"\fmemory_bytes\x18\f \x01(\x03R\vmemoryBytes\x1aD\n" +
+	"\fmemory_bytes\x18\f \x01(\x03R\vmemoryBytes\x12!\n" +
+	"\fcpu_features\x18\r \x03(\tR\vcpuFeatures\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
@@ -1838,7 +1867,7 @@ const file_ateom_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"C\n" +
 	"\x1aCheckpointWorkloadResponse\x12%\n" +
-	"\x0esnapshot_files\x18\x01 \x03(\tR\rsnapshotFiles\"\xe0\x05\n" +
+	"\x0esnapshot_files\x18\x01 \x03(\tR\rsnapshotFiles\"\x83\x06\n" +
 	"\x16RestoreWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -1856,7 +1885,8 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0eegress_gateway\x18\f \x01(\v2\x14.ateom.EgressGatewayH\x00R\regressGateway\x88\x01\x01\x12.\n" +
 	"\x13golden_snapshot_uri\x18\r \x01(\tR\x11goldenSnapshotUri\x12\x1b\n" +
 	"\tcpu_milli\x18\x0e \x01(\x03R\bcpuMilli\x12!\n" +
-	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x1aD\n" +
+	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x12!\n" +
+	"\fcpu_features\x18\x10 \x03(\tR\vcpuFeatures\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
