@@ -57,7 +57,9 @@ func ValidateServerConfig(cfg ServerConfig) error {
 type JWTProvider struct {
 	Name   string
 	Issuer string
-	Verify func(context.Context, string) (string, error)
+	// Verify returns the principal a valid token identifies and the names of
+	// the claim rules it satisfies.
+	Verify func(context.Context, string) (id string, rules []string, err error)
 }
 
 // ServerConfig configures the server-side auth interceptor.
@@ -117,8 +119,10 @@ type chainedServerAuthenticator struct {
 func (a chainedServerAuthenticator) authenticate(ctx context.Context) (context.Context, error) {
 	if id, ok := mtlsPeerIdentity(ctx); ok {
 		return principal.InjectContext(ctx, principal.PrincipalInfo{
-			ID:   id,
-			Kind: principal.KindMTLS,
+			ID:       id,
+			Kind:     principal.KindMTLS,
+			Provider: principal.ProviderMTLS,
+			Groups:   []string{principal.GroupAuthenticated, principal.ProviderMTLS},
 		}), nil
 	}
 	return a.jwt.authenticate(ctx)
@@ -176,15 +180,21 @@ func (a jwtServerAuthenticator) authenticate(ctx context.Context) (context.Conte
 		if provider.Issuer != issuer {
 			continue
 		}
-		id, err := provider.Verify(ctx, bearer)
+		id, rules, err := provider.Verify(ctx, bearer)
 		if err != nil {
 			slog.DebugContext(ctx, "JWT verification failed", slog.String("provider", provider.Name), slog.Any("err", err))
 			return nil, status.Error(codes.Unauthenticated, "invalid bearer token")
 		}
+		groups := []string{principal.GroupAuthenticated, provider.Name}
+		for _, rule := range rules {
+			groups = append(groups, provider.Name+"/"+rule)
+		}
 		return principal.InjectContext(ctx, principal.PrincipalInfo{
-			ID:     id,
-			Kind:   principal.KindJWT,
-			Issuer: provider.Issuer,
+			ID:       id,
+			Kind:     principal.KindJWT,
+			Issuer:   provider.Issuer,
+			Provider: provider.Name,
+			Groups:   groups,
 		}), nil
 	}
 	slog.DebugContext(ctx, "No JWT provider matched token issuer", slog.String("issuer", issuer))

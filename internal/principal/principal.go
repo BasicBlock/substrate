@@ -23,11 +23,26 @@ const (
 	KindJWT  = "jwt"
 )
 
+// ProviderMTLS is the Provider of a principal authenticated by a client
+// certificate, whose ID is the certificate's first URI SAN.
+const ProviderMTLS = "mtls"
+
+// GroupAuthenticated is the group every authenticated principal belongs to.
+const GroupAuthenticated = "authenticated"
+
 // PrincipalInfo contains information about an authenticated principal.
 type PrincipalInfo struct {
 	ID     string
 	Kind   string
 	Issuer string
+
+	// Provider names what authenticated the principal: a JWT provider's name,
+	// or ProviderMTLS. Together with ID it identifies the principal.
+	Provider string
+
+	// Groups are the principal groups it belongs to: GroupAuthenticated, its
+	// Provider, and "<provider>/<rule>" for each named claim rule it satisfied.
+	Groups []string
 }
 
 type contextKey struct{}

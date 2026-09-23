@@ -598,12 +598,12 @@ func buildJWTProviders(ctx context.Context, cfg *apiauthn.AuthenticationConfig) 
 		serverCfg.JWTProviders = append(serverCfg.JWTProviders, apiauthn.JWTProvider{
 			Name:   providerCfg.Name,
 			Issuer: providerCfg.Issuer,
-			Verify: func(ctx context.Context, bearer string) (string, error) {
+			Verify: func(ctx context.Context, bearer string) (string, []string, error) {
 				claims, err := verifier.Verify(ctx, bearer, time.Now())
 				if err != nil {
-					return "", err
+					return "", nil, err
 				}
-				return claims.Subject, nil
+				return providerCfg.Principal(claims.Raw)
 			},
 		})
 		slog.InfoContext(ctx, "Configured JWT provider", slog.String("name", providerCfg.Name), slog.String("issuer", providerCfg.Issuer))
