@@ -713,6 +713,8 @@ func (f fakeObjectStorage) GetObject(_ context.Context, _, _ string) (io.ReadClo
 
 func (fakeObjectStorage) PutObject(_ context.Context, _, _ string, _ io.Reader) error { return nil }
 
+func (f fakeObjectStorage) DeleteObject(_ context.Context, _, _ string) error { return f.err }
+
 // TestFetchAssetStreaming covers the streamed download: good asset cached,
 // over-cap rejected, hash mismatch rejected (failures leave no cache file).
 func TestFetchAssetStreaming(t *testing.T) {
@@ -1312,6 +1314,17 @@ func (r *recordingObjectStorage) PutObject(_ context.Context, bucket, object str
 		r.objects = map[string][]byte{}
 	}
 	r.objects[bucket+"/"+object] = b
+	return nil
+}
+
+func (r *recordingObjectStorage) DeleteObject(_ context.Context, bucket, object string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := bucket + "/" + object
+	if _, ok := r.objects[key]; !ok {
+		return fmt.Errorf("%w: Bucket:%q, Object:%q", objectstorage.ErrObjectNotFound, bucket, object)
+	}
+	delete(r.objects, key)
 	return nil
 }
 

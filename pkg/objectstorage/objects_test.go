@@ -47,12 +47,48 @@ func (s *memStore) GetObject(_ context.Context, bucket, object string) (io.ReadC
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
+func (s *memStore) DeleteObject(_ context.Context, bucket, object string) error {
+	key := bucket + "/" + object
+	if _, ok := s.m[key]; !ok {
+		return fmt.Errorf("%w: object %q/%q not found", ErrObjectNotFound, bucket, object)
+	}
+	delete(s.m, key)
+	return nil
+}
+
 // streamingMemStore is a memStore that advertises streaming PutObject support, so
 // sendZstd takes the pipe (compress∥upload overlap) path used for GCS
 // instead of staging a seekable temp file.
 type streamingMemStore struct{ *memStore }
 
 func (s *streamingMemStore) supportsStreamingPut() {}
+
+// TestDeleteIfExists confirms it succeeds both for an object that exists (and
+// is actually removed) and for one already gone, but still surfaces any other
+// DeleteObject error.
+func TestDeleteIfExists(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("deletes an existing object", func(t *testing.T) {
+		store := newMemStore()
+		if err := store.PutObject(ctx, "bkt", "obj", bytes.NewReader([]byte("data"))); err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+		if err := DeleteIfExists(ctx, store, "bkt", "obj"); err != nil {
+			t.Fatalf("DeleteIfExists: %v", err)
+		}
+		if _, ok := store.m["bkt/obj"]; ok {
+			t.Error("object still present after DeleteIfExists")
+		}
+	})
+
+	t.Run("already gone is not an error", func(t *testing.T) {
+		store := newMemStore()
+		if err := DeleteIfExists(ctx, store, "bkt", "obj"); err != nil {
+			t.Fatalf("DeleteIfExists: %v", err)
+		}
+	})
+}
 
 // TestSparseUploadStreamingRoundTrip drives the STREAMING upload path (GCS-like
 // backend) end-to-end through the real entry points: the object must still be the
