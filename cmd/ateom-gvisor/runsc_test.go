@@ -104,3 +104,56 @@ func TestResumeArgs(t *testing.T) {
 		t.Errorf("resumeArgs() = %v, want %v", got, want)
 	}
 }
+
+func TestFsCheckpointArgs(t *testing.T) {
+	r := &runsc{
+		path:     "/usr/bin/runsc",
+		actorUID: "test-actor-123",
+	}
+
+	tests := []struct {
+		name         string
+		checkpoint   string
+		paths        []string
+		leaveRunning bool
+		want         []string
+	}{
+		{
+			name:       "no paths, ends the session",
+			checkpoint: "/checkpoints/fs",
+			want: []string{
+				"-log-format", "json",
+				"--alsologtostderr",
+				"-root", ateompath.RunSCStateDir("test-actor-123"),
+				"fscheckpoint",
+				"-image-path", "/checkpoints/fs",
+				ocispec.PauseContainer,
+			},
+		},
+		{
+			name:         "explicit per-container paths, leaves the sandbox running",
+			checkpoint:   "/checkpoints/fs",
+			paths:        []string{"pause:/", "app:/"},
+			leaveRunning: true,
+			want: []string{
+				"-log-format", "json",
+				"--alsologtostderr",
+				"-root", ateompath.RunSCStateDir("test-actor-123"),
+				"fscheckpoint",
+				"-image-path", "/checkpoints/fs",
+				"-leave-running",
+				"-path", "pause:/",
+				"-path", "app:/",
+				ocispec.PauseContainer,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.fsCheckpointArgs(ocispec.PauseContainer, tt.checkpoint, tt.paths, tt.leaveRunning)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("fsCheckpointArgs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

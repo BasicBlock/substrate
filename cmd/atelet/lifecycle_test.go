@@ -28,6 +28,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // useTempNodeDirs roots atelet's on-node state in temp directories so a test
@@ -55,6 +57,15 @@ type fakeAteom struct {
 	// restored holds the file contents staged into the restore-state dir by
 	// the most recent RestoreWorkload.
 	restored map[string]string
+	// failRestoreScope, when not SNAPSHOT_SCOPE_UNSPECIFIED, makes
+	// RestoreWorkload fail for that one scope and succeed for any other, so a
+	// test can simulate a Full restore's memory restore failing (e.g. an
+	// incompatible CPU feature set) and observe atelet's Filesystem fallback.
+	failRestoreScope ateompb.SnapshotScope
+	// restoreScopes records, in order, every scope RestoreWorkload was
+	// called with, so a test can assert a fallback actually retried with a
+	// different scope rather than just succeeding on the first try.
+	restoreScopes []ateompb.SnapshotScope
 }
 
 func (f *fakeAteom) RunWorkload(context.Context, *ateompb.RunWorkloadRequest) (*ateompb.RunWorkloadResponse, error) {
@@ -65,7 +76,13 @@ func (f *fakeAteom) CheckpointWorkload(_ context.Context, req *ateompb.Checkpoin
 	dir := ateompath.CheckpointStateDir(req.GetActorUid())
 	names := make([]string, 0, len(f.snapshotFiles))
 	for name, body := range f.snapshotFiles {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		// A gVisor Full checkpoint's filesystem image nests under a
+		// subdirectory (ateompath.GVisorFSCheckpointDir); create it.
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			return nil, err
 		}
 		names = append(names, name)
@@ -74,6 +91,10 @@ func (f *fakeAteom) CheckpointWorkload(_ context.Context, req *ateompb.Checkpoin
 }
 
 func (f *fakeAteom) RestoreWorkload(_ context.Context, req *ateompb.RestoreWorkloadRequest) (*ateompb.RestoreWorkloadResponse, error) {
+	f.restoreScopes = append(f.restoreScopes, req.GetScope())
+	if f.failRestoreScope != ateompb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED && req.GetScope() == f.failRestoreScope {
+		return nil, status.Error(codes.Internal, "simulated runsc restore failure (e.g. an incompatible CPU feature set)")
+	}
 	dir := ateompath.RestoreStateDir(req.GetActorUid())
 	f.restored = map[string]string{}
 	for name := range f.snapshotFiles {
@@ -248,6 +269,127 @@ func TestLocalSnapshotGC(t *testing.T) {
 		t.Errorf("actor dir %s survived terminate with %d entries: %v", actorDir, len(left), left)
 	} else if !os.IsNotExist(err) {
 		t.Errorf("reading actor dir %s: %v", actorDir, err)
+	}
+}
+
+// TestRestoreFallsBackToFilesystemWhenFullRestoreFails walks an actor through
+// run -> pause (Full, with a filesystem image) -> resume, where ateom's
+// memory restore fails (simulating an incompatible CPU feature set). The
+// snapshot carries a filesystem image, so atelet must fall back to a cold
+// boot from it instead of failing the resume, and report that it did.
+func TestRestoreFallsBackToFilesystemWhenFullRestoreFails(t *testing.T) {
+	useTempNodeDirs(t)
+	ctx := t.Context()
+
+	const (
+		atespace     = "ate-demo"
+		actorName    = "counter"
+		actorUID     = "actor-uid-1"
+		ateomUID     = "ateom-uid-1"
+		snapshotName = "pause-snap-1"
+	)
+
+	fsManifest := ateompath.GVisorFSCheckpointDir + "/" + ateompath.GVisorFSCheckpointManifestFile
+	ateom := &fakeAteom{
+		snapshotFiles: map[string]string{
+			"checkpoint.img": "guest-memory",
+			fsManifest:       "fs-manifest",
+		},
+		failRestoreScope: ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+	}
+	serveFakeAteom(t, ateom)
+
+	host := imageVolumeTestRegistry(t)
+	image := host + "/actor:v1"
+	pushTestImage(t, image, singleFileLayer(t, "bin/app", "app"))
+
+	runsc := []byte("runsc binary")
+	s := &AteomHerder{
+		ateomDialer:       newAteomDialer(1),
+		imageCache:        newImageVolumeStore(t),
+		anonGCSClient:     fakeObjectStorage{data: runsc},
+		systemInfoVolumes: newSystemInfoVolumeRefresher(nil, nil),
+	}
+	sandboxAssets := &ateletpb.SandboxAssets{
+		SandboxClass: "gvisor",
+		PauseImage:   image,
+		Assets: map[string]*ateletpb.ArchAssets{
+			runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
+				runscAssetName: {
+					Url:    "gs://test-bucket/runsc",
+					Sha256: fmt.Sprintf("%x", sha256.Sum256(runsc)),
+				},
+			}},
+		},
+	}
+	spec := &ateletpb.WorkloadSpec{
+		Containers: []*ateletpb.Container{{Name: "app", Image: image, Command: []string{"/bin/app"}}},
+	}
+
+	if _, err := s.Run(ctx, &ateletpb.RunRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		TargetAteomUid:        ateomUID,
+		SandboxAssets:         sandboxAssets,
+		Spec:                  spec,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := s.Checkpoint(ctx, &ateletpb.CheckpointRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		TargetAteomUid:        ateomUID,
+		Spec:                  spec,
+		Scope:                 ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
+		Config: &ateletpb.CheckpointRequest_LocalConfig{
+			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		},
+	}); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ateompath.LocalSnapshotDir(actorUID, snapshotName), fsManifest)); err != nil {
+		t.Fatalf("pause did not write the filesystem image alongside the Full snapshot: %v", err)
+	}
+
+	resp, err := s.Restore(ctx, &ateletpb.RestoreRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		TargetAteomUid:        ateomUID,
+		Spec:                  spec,
+		Scope:                 ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
+		Config: &ateletpb.RestoreRequest_LocalConfig{
+			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Restore: %v, want the Filesystem fallback to succeed", err)
+	}
+	if !resp.GetRestoredViaFilesystemFallback() {
+		t.Error("RestoredViaFilesystemFallback = false, want true")
+	}
+	wantScopes := []ateompb.SnapshotScope{
+		ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+		ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM,
+	}
+	if len(ateom.restoreScopes) != len(wantScopes) {
+		t.Fatalf("ateom.RestoreWorkload called with scopes %v, want %v", ateom.restoreScopes, wantScopes)
+	}
+	for i, want := range wantScopes {
+		if ateom.restoreScopes[i] != want {
+			t.Errorf("ateom.RestoreWorkload call %d scope = %v, want %v", i, ateom.restoreScopes[i], want)
+		}
 	}
 }
 

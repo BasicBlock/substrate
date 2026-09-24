@@ -16,6 +16,7 @@
 package ateompath
 
 import (
+	"os"
 	"path/filepath"
 )
 
@@ -197,6 +198,40 @@ func LocalSnapshotDir(actorUID, snapshotName string) string {
 // snapshot consists of this file alone, so atelet uses the name to carve the
 // durable data out of a FULL snapshot's file set.
 const DurableDirTarFile = "durable-dir.tar"
+
+// GVisorFSCheckpointDir is the subdirectory a gVisor Full checkpoint's
+// filesystem image lands in, alongside the memory checkpoint's own top-level
+// files (checkpoint.img, pages_meta.img, pages.img) -- separate because
+// runsc's own `checkpoint -fs-checkpoint-paths` combined capture reuses the
+// pages_meta.img/pages.img basenames for the filesystem image's own pages.
+// A standalone Filesystem-scope capture (no memory checkpoint to collide
+// with) instead writes its files directly at the snapshot root. This
+// directory name is a coupling to runsc's own
+// pkg/sentry/state/checkpointfiles.FSCheckpointDir; a runsc upgrade that
+// renames it must update this constant too.
+const GVisorFSCheckpointDir = "fs"
+
+// GVisorFSCheckpointManifestFile is the filesystem checkpoint's manifest,
+// present exactly when a filesystem image exists: at the snapshot root for a
+// standalone Filesystem-scope capture, or under GVisorFSCheckpointDir for a
+// Full capture that also carries one. Coupled to runsc's own
+// pkg/sentry/state/checkpointfiles.FSCheckpointManifestFileName.
+const GVisorFSCheckpointManifestFile = "fscheckpoint.pb"
+
+// GVisorFSCheckpointPath returns the directory a Full checkpoint's filesystem
+// image is written under, given the checkpoint's own top-level directory.
+func GVisorFSCheckpointPath(checkpointDir string) string {
+	return filepath.Join(checkpointDir, GVisorFSCheckpointDir)
+}
+
+// HasGVisorFSCheckpoint reports whether dir directly holds a gVisor
+// filesystem checkpoint (its manifest file at the top level of dir) -- true
+// for a standalone Filesystem-scope capture's own directory, or for the
+// nested GVisorFSCheckpointDir of a Full capture that also carries one.
+func HasGVisorFSCheckpoint(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, GVisorFSCheckpointManifestFile))
+	return err == nil
+}
 
 // DurableDirVolumeMountsDir is the directory where individual durable-dir
 // volumes are mounted.

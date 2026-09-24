@@ -82,13 +82,17 @@ type snapshotOp struct {
 	// failedPhase is the step the operation died in, so error.type lands there
 	// and on the total rather than on the phases that had already succeeded.
 	failedPhase string
+	// fallback is set only when a restore actually fell back (e.g.
+	// ateattr.RestoreFallbackFilesystem); empty otherwise, so it never widens
+	// the label set of a restore that never falls back.
+	fallback string
 }
 
-// attrs omits kind and sandbox class while they are unknown (a restore that
-// failed before reading the snapshot manifest) rather than emitting an
-// empty-string series.
+// attrs omits kind, sandbox class, and fallback while they are unknown or
+// unset (a restore that failed before reading the snapshot manifest, or one
+// that never fell back) rather than emitting an empty-string series.
 func (o snapshotOp) attrs() []attribute.KeyValue {
-	attrs := make([]attribute.KeyValue, 0, 5)
+	attrs := make([]attribute.KeyValue, 0, 6)
 	attrs = append(attrs,
 		ateattr.TemplateAtespaceKey.String(o.templateNamespace),
 		ateattr.TemplateNameKey.String(o.templateName),
@@ -99,6 +103,9 @@ func (o snapshotOp) attrs() []attribute.KeyValue {
 	}
 	if o.sandboxClass != "" {
 		attrs = append(attrs, ateattr.SandboxClassAttribute(o.sandboxClass))
+	}
+	if o.fallback != "" {
+		attrs = append(attrs, ateattr.RestoreFallbackKey.String(o.fallback))
 	}
 	return attrs
 }

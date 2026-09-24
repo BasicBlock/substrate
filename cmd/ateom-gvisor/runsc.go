@@ -176,10 +176,9 @@ func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath
 	return nil
 }
 
-//nolint:unused
-func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPath string, durableDirMounts []string) error {
-	slog.InfoContext(ctx, "About to run runsc fscheckpoint", slog.String("container", containerName))
-
+// fsCheckpointArgs builds the argv for `runsc fscheckpoint`. Factored out so
+// the argument construction can be unit-tested without executing runsc.
+func (r *runsc) fsCheckpointArgs(containerName, checkpointPath string, paths []string, leaveRunning bool) []string {
 	args := []string{
 		"-log-format", "json",
 		"--alsologtostderr",
@@ -192,17 +191,32 @@ func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPa
 		"fscheckpoint",
 		"-image-path", checkpointPath,
 	}
-	for _, ddv := range durableDirMounts {
-		args = append(args, "-path", ddv)
+	if leaveRunning {
+		args = append(args, "-leave-running")
+	}
+	for _, p := range paths {
+		args = append(args, "-path", p)
 	}
 
 	// name of the container must be the last parameter.
-	args = append(args, containerName)
+	return append(args, containerName)
+}
+
+// cmdFsCheckpoint runs `runsc fscheckpoint`, saving a filesystem-only
+// checkpoint of containerName's sandbox to checkpointPath. paths are the
+// fscheckpoint `-path` targets, each `[container_id:]path` (e.g. "pause:/");
+// empty defaults to fscheckpoint's own default of the invoked container's
+// "/". leaveRunning keeps the sandbox alive afterward (so a memory checkpoint
+// can follow immediately, capturing a Full snapshot's filesystem image and
+// memory at the same point) instead of fscheckpoint's default of ending the
+// session, matching a plain checkpoint's contract.
+func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPath string, paths []string, leaveRunning bool) error {
+	slog.InfoContext(ctx, "About to run runsc fscheckpoint", slog.String("container", containerName), slog.Bool("leaveRunning", leaveRunning))
 
 	cmd := exec.CommandContext(
 		ctx,
 		r.path,
-		args...,
+		r.fsCheckpointArgs(containerName, checkpointPath, paths, leaveRunning)...,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -312,8 +312,10 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		{"unspecified snapshot type", makeReq(func(r *ateletpb.CheckpointRequest) { r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_UNSPECIFIED }), true},
 		{"unspecified snapshot scope", makeReq(func(r *ateletpb.CheckpointRequest) { r.Scope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED }), true},
 		{"invalid snapshot scope", makeReq(func(r *ateletpb.CheckpointRequest) { r.Scope = ateletpb.SnapshotScope(23) }), true},
+		{"filesystem scope is valid for checkpoints", makeReq(func(r *ateletpb.CheckpointRequest) { r.Scope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM }), false},
 		// DATA_ON_GOLDEN is a restore-only scope: checkpoints only ever
-		// capture FULL or DATA, so a checkpoint carrying it is a bug upstream.
+		// capture FULL, FILESYSTEM, or DATA, so a checkpoint carrying it is a
+		// bug upstream.
 		{"data-on-golden scope is restore-only", makeReq(func(r *ateletpb.CheckpointRequest) { r.Scope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN }), true},
 	}
 	for _, tc := range tests {
@@ -372,6 +374,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 		{"unspecified snapshot type", makeReq(func(r *ateletpb.RestoreRequest) { r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_UNSPECIFIED }), true},
 		{"unspecified snapshot scope", makeReq(func(r *ateletpb.RestoreRequest) { r.Scope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED }), true},
 		{"invalid snapshot scope", makeReq(func(r *ateletpb.RestoreRequest) { r.Scope = ateletpb.SnapshotScope(23) }), true},
+		{"filesystem scope is valid for restores", makeReq(func(r *ateletpb.RestoreRequest) { r.Scope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM }), false},
 		{"data-on-golden with golden uri", makeReq(func(r *ateletpb.RestoreRequest) {
 			r.Scope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN
 			r.GoldenSnapshotUri = goldenSnapshotURI
@@ -413,6 +416,7 @@ func TestToAteomSnapshotScope(t *testing.T) {
 		want ateompb.SnapshotScope
 	}{
 		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL},
+		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM, ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM},
 		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA, ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA},
 		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN, ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN},
 	}
@@ -1289,7 +1293,11 @@ func writeLocalSnapshot(t *testing.T, dir string, rec sandboxAssetsRecord, conte
 		t.Fatalf("creating snapshot dir: %v", err)
 	}
 	for name, body := range contents {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("creating parent directory for %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatalf("writing snapshot file %s: %v", name, err)
 		}
 	}
@@ -1467,6 +1475,109 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 		}
 	})
 
+	t.Run("data capture cannot become filesystem", func(t *testing.T) {
+		s := &AteomHerder{gcsClient: &recordingObjectStorage{}}
+		dir := filepath.Join(t.TempDir(), "pause-snap-1")
+		writeLocalSnapshot(t, dir, sandboxAssetsRecord{
+			SandboxClass:  "gvisor",
+			PauseImage:    testPauseImage,
+			SnapshotFiles: []string{ateompath.DurableDirTarFile},
+			Scope:         ateattr.SnapshotScopeData,
+		}, map[string]string{ateompath.DurableDirTarFile: "data"})
+
+		req := validUploadPausedCheckpointRequest()
+		req.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
+		_, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri)
+		if got := status.Code(err); got != codes.FailedPrecondition {
+			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
+		}
+	})
+
+	t.Run("filesystem capture cannot become full", func(t *testing.T) {
+		s := &AteomHerder{gcsClient: &recordingObjectStorage{}}
+		dir := filepath.Join(t.TempDir(), "pause-snap-1")
+		writeLocalSnapshot(t, dir, sandboxAssetsRecord{
+			SandboxClass:  "gvisor",
+			PauseImage:    testPauseImage,
+			SnapshotFiles: []string{ateompath.GVisorFSCheckpointDir + "/" + ateompath.GVisorFSCheckpointManifestFile, ateompath.DurableDirTarFile},
+			Scope:         ateattr.SnapshotScopeFilesystem,
+		}, map[string]string{ateompath.DurableDirTarFile: "data"})
+
+		_, err := s.uploadLocalCheckpointDir(ctx, validUploadPausedCheckpointRequest(), dir, uri)
+		if got := status.Code(err); got != codes.FailedPrecondition {
+			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
+		}
+	})
+
+	t.Run("gvisor full capture narrows to filesystem, keeping the fs image and durable tar", func(t *testing.T) {
+		store := &recordingObjectStorage{}
+		s := &AteomHerder{gcsClient: store}
+		dir := filepath.Join(t.TempDir(), "pause-snap-1")
+		fsManifest := ateompath.GVisorFSCheckpointDir + "/" + ateompath.GVisorFSCheckpointManifestFile
+		writeLocalSnapshot(t, dir, sandboxAssetsRecord{
+			SandboxClass: "gvisor",
+			PauseImage:   testPauseImage,
+			SnapshotFiles: []string{
+				"checkpoint.img", "pages_meta.img", "pages.img",
+				fsManifest, ateompath.DurableDirTarFile,
+			},
+			Scope: ateattr.SnapshotScopeFull,
+		}, map[string]string{
+			"checkpoint.img": "mem", "pages_meta.img": "meta", "pages.img": "pages",
+			fsManifest: "fs", ateompath.DurableDirTarFile: "data",
+		})
+
+		req := validUploadPausedCheckpointRequest()
+		req.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
+		if _, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri); err != nil {
+			t.Fatalf("uploadLocalCheckpointDir: %v", err)
+		}
+		rec := remoteManifest(t, store)
+		if rec.Scope != ateattr.SnapshotScopeFilesystem {
+			t.Errorf("uploaded manifest scope = %q, want %q", rec.Scope, ateattr.SnapshotScopeFilesystem)
+		}
+		want := []string{fsManifest, ateompath.DurableDirTarFile}
+		if !slices.Equal(rec.SnapshotFiles, want) {
+			t.Errorf("uploaded manifest files = %v, want %v", rec.SnapshotFiles, want)
+		}
+		if slices.Contains(rec.SnapshotFiles, "checkpoint.img") {
+			t.Error("narrowed manifest still lists the memory checkpoint file")
+		}
+	})
+
+	t.Run("gvisor full capture without a filesystem image cannot narrow to filesystem", func(t *testing.T) {
+		s := &AteomHerder{gcsClient: &recordingObjectStorage{}}
+		dir := filepath.Join(t.TempDir(), "pause-snap-1")
+		writeLocalSnapshot(t, dir, sandboxAssetsRecord{
+			SandboxClass:  "gvisor",
+			PauseImage:    testPauseImage,
+			SnapshotFiles: []string{"checkpoint.img"},
+			Scope:         ateattr.SnapshotScopeFull,
+		}, map[string]string{"checkpoint.img": "mem"})
+
+		req := validUploadPausedCheckpointRequest()
+		req.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
+		_, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri)
+		if got := status.Code(err); got != codes.FailedPrecondition {
+			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
+		}
+	})
+
+	t.Run("microvm cannot narrow to filesystem", func(t *testing.T) {
+		s := &AteomHerder{gcsClient: &recordingObjectStorage{}}
+		dir := filepath.Join(t.TempDir(), "pause-snap-1")
+		writeLocalSnapshot(t, dir, fullRec("microvm"), map[string]string{
+			"config.json": "cfg", "memory-ranges": "mem", ateompath.DurableDirTarFile: "data",
+		})
+
+		req := validUploadPausedCheckpointRequest()
+		req.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
+		_, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri)
+		if got := status.Code(err); got != codes.FailedPrecondition {
+			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
+		}
+	})
+
 	t.Run("manifest without scope is rejected", func(t *testing.T) {
 		store := &recordingObjectStorage{}
 		s := &AteomHerder{gcsClient: store}
@@ -1544,6 +1655,9 @@ func TestValidateUploadPausedCheckpointRequest(t *testing.T) {
 		{"valid data scope", func(r *ateletpb.UploadPausedCheckpointRequest) {
 			r.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA
 		}, false},
+		{"valid filesystem scope", func(r *ateletpb.UploadPausedCheckpointRequest) {
+			r.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
+		}, false},
 		{"invalid atespace", func(r *ateletpb.UploadPausedCheckpointRequest) { r.Atespace = "../escape" }, true},
 		{"golden atespace rejected", func(r *ateletpb.UploadPausedCheckpointRequest) { r.Atespace = resources.GoldenActorAtespace }, true},
 		{"invalid actor name", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorName = "UPPER" }, true},
@@ -1582,6 +1696,13 @@ func TestShouldHaveSnapshots(t *testing.T) {
 			name: "full scope always expects snapshots",
 			req: &ateletpb.CheckpointRequest{
 				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+			},
+			want: true,
+		},
+		{
+			name: "filesystem scope always expects snapshots",
+			req: &ateletpb.CheckpointRequest{
+				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM,
 			},
 			want: true,
 		},

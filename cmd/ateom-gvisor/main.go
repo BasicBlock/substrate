@@ -866,10 +866,50 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			return nil, fmt.Errorf("while archiving durable-dir volumes: %w", tarErr)
 		}
 	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
-		// Checkpoint pause container (root of the sandbox)
-		// TODO: Consider pause -> tar -> resume -> checkpoint order for better failure handling.
+		// Capture the filesystem image alongside the memory checkpoint, at
+		// the same paused instant, so the two are consistent: pause first
+		// (fscheckpoint and checkpoint are each independently consistent
+		// snapshots, but only a shared pause holds them at the SAME instant
+		// relative to each other), fscheckpoint with -leave-running so the
+		// sandbox survives for the checkpoint call that follows, then take
+		// the memory checkpoint as today (which ends the session).
+		//
+		// The filesystem capture is best-effort: gVisor's fscheckpoint is
+		// experimental, and its failure must not turn an otherwise-working
+		// memory checkpoint into a failed suspend/pause. A Full snapshot
+		// missing its filesystem image just keeps today's behavior (no
+		// filesystem-fallback restore path for it).
+		if err := rcmd.cmdPause(ctx, ocispec.PauseContainer); err != nil {
+			return nil, fmt.Errorf("while pausing pause container: %w", err)
+		}
+		fsCheckpointPath := ateompath.GVisorFSCheckpointPath(checkpointPath)
+		if err := rcmd.cmdFsCheckpoint(ctx, ocispec.PauseContainer, fsCheckpointPath, fsCheckpointTargets(req.GetSpec().GetContainers()), true /* leaveRunning */); err != nil {
+			slog.WarnContext(ctx, "Failed to capture filesystem image alongside Full checkpoint; continuing without one",
+				slog.String("actor", attribution.Ref.String()), slog.Any("err", err))
+			if rmErr := os.RemoveAll(fsCheckpointPath); rmErr != nil {
+				slog.WarnContext(ctx, "Failed to remove partial filesystem checkpoint", slog.Any("err", rmErr))
+			}
+		}
+		// Checkpoint pause container (root of the sandbox). This ends the
+		// session (the sandbox exits), whether or not the fscheckpoint above
+		// succeeded -- no explicit resume is needed either way.
 		if err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath); err != nil {
 			return nil, fmt.Errorf("while checkpointing pause: %w", err)
+		}
+		if hasDurableVolumes(req.GetSpec().GetContainers()) {
+			if err := tarDurableVolumes(ctx, ateompath.DurableDirVolumeMountsDir(req.GetActorUid()), checkpointPath); err != nil {
+				return nil, fmt.Errorf("while archiving durable-dir volumes: %w", err)
+			}
+		}
+	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+		// Root filesystem only, no process memory: fscheckpoint each
+		// container's "/" in one call (paths keyed per container), which
+		// ends the session by default -- the same contract a memory
+		// checkpoint has -- then archive durable-dir volumes exactly as Full
+		// does (they are host bind mounts, unaffected by the sandbox having
+		// already exited).
+		if err := rcmd.cmdFsCheckpoint(ctx, ocispec.PauseContainer, checkpointPath, fsCheckpointTargets(req.GetSpec().GetContainers()), false /* leaveRunning */); err != nil {
+			return nil, fmt.Errorf("while checkpointing filesystem: %w", err)
 		}
 		if hasDurableVolumes(req.GetSpec().GetContainers()) {
 			if err := tarDurableVolumes(ctx, ateompath.DurableDirVolumeMountsDir(req.GetActorUid()), checkpointPath); err != nil {
@@ -915,9 +955,31 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
 }
 
-// listSnapshotFiles returns the (relative) names of regular files directly under
-// dir, which atelet ships to object storage as the snapshot.
+// listSnapshotFiles returns the (relative) names of regular files directly
+// under dir, plus -- if present -- the regular files directly under its
+// nested ateompath.GVisorFSCheckpointDir (a Full checkpoint's filesystem
+// image, reported as "fs/<name>"), which atelet ships to object storage as
+// the snapshot.
 func listSnapshotFiles(dir string) ([]string, error) {
+	files, err := listRegularFiles(dir, "")
+	if err != nil {
+		return nil, err
+	}
+	fsFiles, err := listRegularFiles(ateompath.GVisorFSCheckpointPath(dir), ateompath.GVisorFSCheckpointDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		files = append(files, fsFiles...)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// listRegularFiles returns the names of regular files directly under dir,
+// each joined with prefix (e.g. "fs/checkpoint.pb") when prefix is non-empty.
+func listRegularFiles(dir, prefix string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -925,10 +987,13 @@ func listSnapshotFiles(dir string) ([]string, error) {
 	var files []string
 	for _, e := range entries {
 		if e.Type().IsRegular() {
-			files = append(files, e.Name())
+			name := e.Name()
+			if prefix != "" {
+				name = prefix + "/" + name
+			}
+			files = append(files, name)
 		}
 	}
-	sort.Strings(files)
 	return files, nil
 }
 
@@ -1069,11 +1134,35 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("while composing pause rootfs: %w", err)
 	}
 
+	// A Filesystem-scope restore (either a standalone Filesystem snapshot, or
+	// the cold-boot fallback for a Full snapshot whose memory restore
+	// failed) cold-boots from the image with the captured filesystem
+	// restored via -fs-restore-image-path, same shape as Data but pointed at
+	// the actual filesystem checkpoint instead of relying only on durable-dir
+	// volumes.
+	var fsRestorePath string
+	if req.GetScope() == ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM {
+		var err error
+		if fsRestorePath, err = resolveFSRestorePath(checkpointDir); err != nil {
+			return nil, fmt.Errorf("while resolving filesystem checkpoint to restore: %w", err)
+		}
+	}
+
 	switch req.GetScope() {
 	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		// Create and start pause container (cold boot with durable-dir volumes restored)
 		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
 		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
+			return nil, fmt.Errorf("while creating pause container: %w", err)
+		}
+		if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
+			return nil, fmt.Errorf("while starting pause container: %w", err)
+		}
+	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+		// Create (with the captured filesystem restored) and start pause
+		// container -- a cold boot, not a runsc restore.
+		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
+		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, []string{"--fs-restore-image-path", fsRestorePath}); err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
 		if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
@@ -1107,6 +1196,14 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 			containersToDelete = append(containersToDelete, ac.GetName())
 			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
+				return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
+			}
+			if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
+				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
+			}
+		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+			containersToDelete = append(containersToDelete, ac.GetName())
+			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), []string{"--fs-restore-image-path", fsRestorePath}); err != nil {
 				return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
 			}
 			if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
