@@ -20,8 +20,9 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/agent-substrate/substrate/cmd/atelet/internal/ateletpath"
+	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -30,7 +31,7 @@ import (
 // gvisorFSManifestFile is the relative snapshot-file name of a gVisor
 // filesystem image's manifest, as it appears in a sandboxAssetsRecord's
 // SnapshotFiles.
-var gvisorFSManifestFile = ateompath.GVisorFSCheckpointDir + "/" + ateompath.GVisorFSCheckpointManifestFile
+var gvisorFSManifestFile = ateletpath.GVisorFSCheckpointDir + "/" + ateletpath.GVisorFSCheckpointManifestFile
 
 // newRecordingSnapshot builds a recordingObjectStorage holding rec's manifest
 // and one object per rec.SnapshotFiles entry at testSnapshotPath, keyed the
@@ -57,7 +58,7 @@ func TestDropSnapshotMemory(t *testing.T) {
 			PauseImage:   testPauseImage,
 			SnapshotFiles: []string{
 				"checkpoint.img", "pages_meta.img", "pages.img",
-				gvisorFSManifestFile, ateompath.DurableDirTarFile,
+				gvisorFSManifestFile, ateletpath.DurableDirTarFile,
 			},
 			Scope: ateattr.SnapshotScopeFull,
 		})
@@ -74,7 +75,7 @@ func TestDropSnapshotMemory(t *testing.T) {
 		if rec.Scope != ateattr.SnapshotScopeFilesystem {
 			t.Errorf("rewritten manifest scope = %q, want %q", rec.Scope, ateattr.SnapshotScopeFilesystem)
 		}
-		wantFiles := []string{gvisorFSManifestFile, ateompath.DurableDirTarFile}
+		wantFiles := []string{gvisorFSManifestFile, ateletpath.DurableDirTarFile}
 		if !slices.Equal(rec.SnapshotFiles, wantFiles) {
 			t.Errorf("rewritten manifest files = %v, want %v", rec.SnapshotFiles, wantFiles)
 		}
@@ -94,7 +95,7 @@ func TestDropSnapshotMemory(t *testing.T) {
 		rec := sandboxAssetsRecord{
 			SandboxClass:  "gvisor",
 			PauseImage:    testPauseImage,
-			SnapshotFiles: []string{gvisorFSManifestFile, ateompath.DurableDirTarFile},
+			SnapshotFiles: []string{gvisorFSManifestFile, ateletpath.DurableDirTarFile},
 			Scope:         ateattr.SnapshotScopeFilesystem,
 		}
 		store := newRecordingSnapshot(t, rec)
@@ -113,7 +114,7 @@ func TestDropSnapshotMemory(t *testing.T) {
 		store := newRecordingSnapshot(t, sandboxAssetsRecord{
 			SandboxClass:  "gvisor",
 			PauseImage:    testPauseImage,
-			SnapshotFiles: []string{ateompath.DurableDirTarFile},
+			SnapshotFiles: []string{ateletpath.DurableDirTarFile},
 			Scope:         ateattr.SnapshotScopeData,
 		})
 		s := &AteomHerder{gcsClient: store}
@@ -134,8 +135,12 @@ func TestDropSnapshotMemory(t *testing.T) {
 		s := &AteomHerder{gcsClient: store}
 
 		_, err := s.DropSnapshotMemory(ctx, &ateletpb.DropSnapshotMemoryRequest{SnapshotUri: testSnapshotURI})
-		if got := status.Code(err); got != codes.FailedPrecondition {
-			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
+		// narrowFullCaptureToFilesystem's own check (predates FILESYSTEM-scope
+		// support) returns an apierror, not a gRPC status directly, so check it
+		// the same way the rest of this package's narrowFullCaptureToFilesystem
+		// assertions do.
+		if got := apierror.Code(err); got != codes.FailedPrecondition {
+			t.Fatalf("apierror.Code = %v (err %v), want FailedPrecondition", got, err)
 		}
 		// Refusing must not touch anything already stored.
 		if len(store.objects) != 4 {

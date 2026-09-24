@@ -522,6 +522,27 @@ func (s *RPCService) SuspendActor(ctx context.Context, req *ateapipb.SuspendActo
 	return &ateapipb.SuspendActorResponse{Actor: actor}, nil
 }
 
+func (s *RPCService) DropSnapshotMemory(ctx context.Context, req *ateapipb.DropSnapshotMemoryRequest) (*ateapipb.DropSnapshotMemoryResponse, error) {
+	if errs := apivalidation.ValidateDropSnapshotMemoryRequest(ctx, req); len(errs) > 0 {
+		return nil, resources.ToGRPCStatusError(errs)
+	}
+	actorRef := resources.ActorRefFromObjectRef(req.GetActor())
+	setSpanActorRefAttributes(ctx, actorRef)
+
+	actor, err := s.actorWorkflow.DropSnapshotMemory(ctx, actorRef)
+	if err != nil {
+		if errors.Is(err, store.ErrVersionConflict) {
+			return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "Actor %s not found", actorRef)
+		}
+		return nil, err
+	}
+	setSpanActorAttributes(ctx, actor)
+	return &ateapipb.DropSnapshotMemoryResponse{Actor: actor}, nil
+}
+
 func (s *RPCService) RevertActor(ctx context.Context, req *ateapipb.RevertActorRequest) (*ateapipb.RevertActorResponse, error) {
 	if errs := apivalidation.ValidateRevertActorRequest(ctx, req); len(errs) > 0 {
 		return nil, resources.ToGRPCStatusError(errs)

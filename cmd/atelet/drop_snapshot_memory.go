@@ -21,10 +21,10 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/agent-substrate/substrate/cmd/atelet/internal/ategcs"
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/objectstorage"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -57,7 +57,7 @@ func (s *AteomHerder) DropSnapshotMemory(ctx context.Context, req *ateletpb.Drop
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	manifest, err := ategcs.FetchFromGCS(ctx, s.gcsClient, manifestURI)
+	manifest, err := objectstorage.FetchFromGCS(ctx, s.gcsClient, manifestURI)
 	if err != nil {
 		return nil, fmt.Errorf("while fetching snapshot manifest: %w", err)
 	}
@@ -87,7 +87,7 @@ func (s *AteomHerder) DropSnapshotMemory(ctx context.Context, req *ateletpb.Drop
 	if err != nil {
 		return nil, fmt.Errorf("while marshaling narrowed snapshot manifest: %w", err)
 	}
-	if err := ategcs.SendBytesToGCS(ctx, s.gcsClient, manifestURI, manifestBytes); err != nil {
+	if err := objectstorage.SendBytesToGCS(ctx, s.gcsClient, manifestURI, manifestBytes); err != nil {
 		return nil, fmt.Errorf("while uploading narrowed snapshot manifest: %w", err)
 	}
 
@@ -106,7 +106,7 @@ var staleFullOnlyFiles = []string{"checkpoint.img", "pages_meta.img", "pages.img
 // rewrite (already committed by the time this runs) is what a restore
 // depends on, so a stuck delete leaves only reclaimable storage, not a
 // correctness problem, and a later DropSnapshotMemory retries it.
-func deleteObjectsNotIn(ctx context.Context, client ategcs.ObjectStorage, uri resources.SnapshotURI, before, after []string) {
+func deleteObjectsNotIn(ctx context.Context, client objectstorage.ObjectStorage, uri resources.SnapshotURI, before, after []string) {
 	for _, name := range before {
 		if slices.Contains(after, name) {
 			continue
@@ -116,7 +116,7 @@ func deleteObjectsNotIn(ctx context.Context, client ategcs.ObjectStorage, uri re
 			slog.WarnContext(ctx, "Failed to address stale snapshot object for deletion", slog.String("file", name), slog.Any("err", err))
 			continue
 		}
-		if err := ategcs.DeleteIfExists(ctx, client, objectURI); err != nil {
+		if err := objectstorage.DeleteIfExists(ctx, client, objectURI); err != nil {
 			slog.WarnContext(ctx, "Failed to delete stale snapshot object; it will be retried on the next DropSnapshotMemory call",
 				slog.String("file", name), slog.Any("err", err))
 		}

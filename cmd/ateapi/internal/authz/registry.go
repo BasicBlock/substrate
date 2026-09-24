@@ -242,8 +242,11 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapipb.Control_UpdateActor_FullMethodName:  rule(updateActorRule()),
 	ateapipb.Control_SuspendActor_FullMethodName: rule(actorRule[*ateapipb.SuspendActorRequest](RelationCanSuspend)),
 	// Pausing keeps a node-local snapshot: the same authority as suspending.
-	ateapipb.Control_PauseActor_FullMethodName:  rule(actorRule[*ateapipb.PauseActorRequest](RelationCanSuspend)),
-	ateapipb.Control_ResumeActor_FullMethodName: rule(actorRule[*ateapipb.ResumeActorRequest](RelationCanResume)),
+	ateapipb.Control_PauseActor_FullMethodName: rule(actorRule[*ateapipb.PauseActorRequest](RelationCanSuspend)),
+	// Dropping a snapshot's memory is a snapshot-management operation on the
+	// actor's stored state, the same authority as suspending it.
+	ateapipb.Control_DropSnapshotMemory_FullMethodName: rule(actorRule[*ateapipb.DropSnapshotMemoryRequest](RelationCanSuspend)),
+	ateapipb.Control_ResumeActor_FullMethodName:        rule(actorRule[*ateapipb.ResumeActorRequest](RelationCanResume)),
 	ateapipb.Control_RevertActor_FullMethodName: rule(actorRule[*ateapipb.RevertActorRequest](RelationCanRevert)),
 	ateapipb.Control_DeleteActor_FullMethodName: rule(actorRule[*ateapipb.DeleteActorRequest](RelationCanDelete)),
 

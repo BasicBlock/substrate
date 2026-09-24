@@ -131,7 +131,26 @@ func (d *AteletDialer) DialForAteletOnNode(nodeName string) (*grpc.ClientConn, e
 		return nil, fmt.Errorf("found %d atelet pods on node %q, expected 1", len(matchingAtelets), nodeName)
 	}
 
-	selectedAtelet := matchingAtelets[0].(*corev1.Pod)
+	return d.dialAtelet(matchingAtelets[0].(*corev1.Pod))
+}
+
+// DialAnyAtelet dials an arbitrary reachable atelet pod, for RPCs whose work
+// is node-independent object-storage I/O (e.g. DropSnapshotMemory, which
+// rewrites a stored snapshot for a SUSPENDED actor -- one with no worker, and
+// so no node, of its own): no actor needs to be running on the pod picked,
+// and no node affinity applies.
+func (d *AteletDialer) DialAnyAtelet() (*grpc.ClientConn, error) {
+	pods := d.ateletIndexer.List()
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("%w: no atelet pods available", ErrNoAteletOnNode)
+	}
+	return d.dialAtelet(pods[0].(*corev1.Pod))
+}
+
+// dialAtelet dials the given atelet pod with per-atelet pod-UID-pinned
+// credentials, caching the connection by the atelet's pod UID. A pod that
+// keeps its UID but gets a new IP, such as after a node restart, is redialed.
+func (d *AteletDialer) dialAtelet(selectedAtelet *corev1.Pod) (*grpc.ClientConn, error) {
 	if len(selectedAtelet.Status.PodIPs) == 0 {
 		return nil, fmt.Errorf("selected atelet %q has no assigned IPs", selectedAtelet.ObjectMeta.Namespace+"/"+selectedAtelet.ObjectMeta.Name)
 	}
