@@ -106,6 +106,12 @@ func GroupObject(name string) string {
 	return "group:" + tupleReplacer.Replace(name)
 }
 
+// AtespacePatternObject formats an atespace pattern's prefix as the OpenFGA
+// object its role bindings are stored on.
+func AtespacePatternObject(prefix string) string {
+	return "atespace_pattern:" + tupleReplacer.Replace(prefix)
+}
+
 // formatUser formats a principal ID as a valid OpenFGA user string.
 // OpenFGA disallows ':', '#', whitespace, and treats '*' as a public wildcard;
 // these characters (plus '%') are percent-encoded to prevent collisions and

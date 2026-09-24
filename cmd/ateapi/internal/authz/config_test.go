@@ -87,6 +87,9 @@ func TestConfigValidate(t *testing.T) {
 				Viewers: []string{"group:google"},
 			},
 		},
+		AtespacePatterns: map[string]AtespaceBindings{
+			"dev-*": {Editors: []string{"kubernetes:system:serviceaccount:internal-eve:devbox-reaper"}},
+		},
 	}
 	if err := valid.Validate(providers, ruleGroups); err != nil {
 		t.Fatalf("Validate(valid config) = %v, want nil", err)
@@ -104,6 +107,11 @@ func TestConfigValidate(t *testing.T) {
 		{"malformed ref", Config{Mode: ModeEnforce, Global: GlobalBindings{Owners: []string{"alice@example.com"}}}},
 		{"empty id", Config{Mode: ModeEnforce, Global: GlobalBindings{Owners: []string{"google:"}}}},
 		{"invalid atespace name", Config{Mode: ModeEnforce, Atespaces: map[string]AtespaceBindings{"Bad Name!": {}}}},
+		{"pattern without a star", Config{Mode: ModeEnforce, AtespacePatterns: map[string]AtespaceBindings{"dev-": {}}}},
+		{"pattern that is only a star", Config{Mode: ModeEnforce, AtespacePatterns: map[string]AtespaceBindings{"*": {}}}},
+		{"star inside a pattern", Config{Mode: ModeEnforce, AtespacePatterns: map[string]AtespaceBindings{"d*v-*": {}}}},
+		{"pattern no atespace name starts with", Config{Mode: ModeEnforce, AtespacePatterns: map[string]AtespaceBindings{"Dev_*": {}}}},
+		{"bad pattern binding", Config{Mode: ModeEnforce, AtespacePatterns: map[string]AtespaceBindings{"ci-*": {Viewers: []string{"nope"}}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,6 +133,10 @@ func TestConfigTuples(t *testing.T) {
 		Atespaces: map[string]AtespaceBindings{
 			"team1": {Owners: []string{"mtls:spiffe://ns/sa"}},
 		},
+		AtespacePatterns: map[string]AtespaceBindings{
+			"dev-*": {Editors: []string{"kubernetes:system:serviceaccount:internal-eve:devbox-reaper"}},
+			"ci-*":  {Viewers: []string{"group:google/basicblock"}},
+		},
 	}
 	tuples := cfg.tuples()
 
@@ -134,7 +146,9 @@ func TestConfigTuples(t *testing.T) {
 		// The "kubernetes" provider segment is dropped, like every other
 		// principal reference (see configMember's doc comment).
 		{user: "user:system%3Aserviceaccount%3Ainternal-preview%3Apreview-proxy", relation: "connector", object: GlobalRootObject}: true,
-		{user: "user:spiffe%3A//ns/sa", relation: RoleOwner, object: "atespace:team1"}: true,
+		{user: "user:spiffe%3A//ns/sa", relation: RoleOwner, object: "atespace:team1"}:                                            true,
+		{user: "group:google/basicblock#member", relation: RoleViewer, object: "atespace_pattern:ci-"}:                           true,
+		{user: "user:system%3Aserviceaccount%3Ainternal-eve%3Adevbox-reaper", relation: RoleEditor, object: "atespace_pattern:dev-"}: true,
 	}
 	if len(tuples) != len(want) {
 		t.Fatalf("len(tuples) = %d, want %d (%+v)", len(tuples), len(want), tuples)
@@ -168,6 +182,10 @@ func TestManaged(t *testing.T) {
 		{bindingKey{"user:a", RoleViewer, "atespace:team1"}, true},
 		{bindingKey{"user:a", "creator", "atespace:team1"}, false},
 		{bindingKey{"group:x#member", "member", "group:x"}, false},
+		{bindingKey{"user:a", RoleOwner, "atespace_pattern:dev-"}, true},
+		{bindingKey{"user:a", RoleEditor, "atespace_pattern:dev-"}, true},
+		{bindingKey{"user:a", RoleViewer, "atespace_pattern:dev-"}, true},
+		{bindingKey{"atespace_pattern:dev-", "parent_pattern", "atespace:dev-a"}, false},
 	}
 	for _, tc := range tests {
 		if got := managed(tc.k); got != tc.want {
@@ -327,5 +345,92 @@ func TestConnectorsConnectEverywhereAndNothingElse(t *testing.T) {
 	}
 	if err := authorizer.Check(proxy, "can_connect", ActorObject("dev-alice", "box")); err == nil {
 		t.Error("a removed connector binding kept access")
+	}
+}
+
+// TestAtespacePatternsBindEveryMatchingAtespace verifies a pattern binding
+// grants its role in every atespace whose name starts with the pattern's
+// prefix, including ones never mentioned in configuration, and nowhere else:
+// not in other atespaces, not beyond the role, and not globally.
+func TestAtespacePatternsBindEveryMatchingAtespace(t *testing.T) {
+	ctx := context.Background()
+	pool := startPostgres(t)
+
+	fgaServer, err := NewOpenFGAServer(pool)
+	if err != nil {
+		t.Fatalf("NewOpenFGAServer: %v", err)
+	}
+	t.Cleanup(fgaServer.Close)
+
+	authorizer, _, err := New(ctx, pool, fgaServer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cfg := &Config{
+		Mode: ModeEnforce,
+		AtespacePatterns: map[string]AtespaceBindings{
+			"dev-*": {
+				Editors: []string{"kubernetes:system:serviceaccount:internal-eve:devbox-reaper"},
+				Viewers: []string{"google:rita@basicblock.io"},
+			},
+		},
+	}
+	if err := authorizer.ReconcileConfig(ctx, cfg); err != nil {
+		t.Fatalf("ReconcileConfig: %v", err)
+	}
+
+	reaper := principal.InjectContext(ctx, principal.PrincipalInfo{ID: "system:serviceaccount:internal-eve:devbox-reaper", Kind: principal.KindJWT, Provider: "kubernetes"})
+	reader := principal.InjectContext(ctx, principal.PrincipalInfo{ID: "rita@basicblock.io", Kind: principal.KindJWT, Provider: "google"})
+
+	// Editor on actors in every matching atespace, created on demand.
+	for _, atespace := range []string{"dev-alice", "dev-someone-new"} {
+		for _, relation := range []string{RelationCanGet, RelationCanUpdate, RelationCanDelete, RelationCanSuspend, RelationCanResume, RelationCanRevert} {
+			if err := authorizer.Check(reaper, relation, ActorObject(atespace, "box")); err != nil {
+				t.Errorf("pattern editor lacks %q on an actor in %q: %v", relation, atespace, err)
+			}
+		}
+		if err := authorizer.Check(reaper, RelationCanGet, AtespaceObject(atespace)); err != nil {
+			t.Errorf("pattern editor cannot get atespace %q: %v", atespace, err)
+		}
+	}
+
+	// An editor, not an owner: it cannot delete the atespace itself.
+	if err := authorizer.Check(reaper, RelationCanDelete, AtespaceObject("dev-alice")); err == nil {
+		t.Error("pattern editor can delete a matching atespace")
+	}
+
+	// Nothing in atespaces the pattern does not match, even ones that share
+	// letters with its prefix.
+	for _, atespace := range []string{"eve", "ci", "development", "bb-dev"} {
+		for _, relation := range []string{RelationCanGet, RelationCanDelete} {
+			if err := authorizer.Check(reaper, relation, ActorObject(atespace, "box")); err == nil {
+				t.Errorf("pattern editor has %q on an actor in unmatched atespace %q", relation, atespace)
+			}
+		}
+	}
+
+	// Nothing global: no listing across atespaces, no workers.
+	for _, relation := range []string{RoleOwner, RoleViewer, RelationCanGet, RelationCanCreateAtespace} {
+		if err := authorizer.Check(reaper, relation, GlobalRootObject); err == nil {
+			t.Errorf("pattern editor has unexpected global relation %q", relation)
+		}
+	}
+
+	// A pattern viewer reads matching atespaces and changes nothing.
+	if err := authorizer.Check(reader, RelationCanGet, ActorObject("dev-alice", "box")); err != nil {
+		t.Errorf("pattern viewer cannot get an actor in a matching atespace: %v", err)
+	}
+	if err := authorizer.Check(reader, RelationCanDelete, ActorObject("dev-alice", "box")); err == nil {
+		t.Error("pattern viewer can delete an actor")
+	}
+
+	// Reconciling a config without the pattern removes it.
+	empty := &Config{Mode: ModeEnforce}
+	if err := authorizer.ReconcileConfig(ctx, empty); err != nil {
+		t.Fatalf("ReconcileConfig (empty): %v", err)
+	}
+	if err := authorizer.Check(reaper, RelationCanDelete, ActorObject("dev-alice", "box")); err == nil {
+		t.Error("a removed pattern binding kept access")
 	}
 }

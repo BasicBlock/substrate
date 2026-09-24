@@ -60,9 +60,20 @@ type global
     define can_get_access_policy: viewer
     define can_update_access_policy: owner
 
+# Roles in every atespace whose name starts with a configured prefix
+# (atespacePatterns), including atespaces created after the binding. ate-api
+# places an atespace under each pattern its name matches (parent_pattern), as it
+# places it under global:root, in the contextual tuples of each check.
+type atespace_pattern
+  relations
+    define owner: [user, group#member]
+    define editor: [user, group#member] or owner
+    define viewer: [user, group#member] or editor
+
 type atespace
   relations
     define parent_global: [global]
+    define parent_pattern: [atespace_pattern]
 
     # The principal that created the atespace, making it an owner without an
     # explicit binding. Nothing currently writes this tuple (no handler calls
@@ -72,9 +83,9 @@ type atespace
 
     # --- 1. Aligned 3-Tier Roles ---
     # Global owner automatically inherits owner without explicit per-atespace tuples
-    define owner: [user, group#member] or creator or owner from parent_global
-    define editor: [user, group#member] or owner
-    define viewer: [user, group#member] or editor or viewer from parent_global
+    define owner: [user, group#member] or creator or owner from parent_global or owner from parent_pattern
+    define editor: [user, group#member] or owner or editor from parent_pattern
+    define viewer: [user, group#member] or editor or viewer from parent_global or viewer from parent_pattern
 
     # Global connectors reach every atespace's actors (see actor.can_connect);
     # this carries no other permission.
