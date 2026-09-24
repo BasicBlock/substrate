@@ -70,6 +70,16 @@ const (
 	// separates the two.
 	ReasonWorkloadNotReady Reason = "WORKLOAD_NOT_READY"
 
+	// ReasonRestoreIncompatible marks a gVisor Full restore's memory restore
+	// (runsc restore) that failed for a reason not attributable to the actor's
+	// own workload config: an incompatible CPU feature set across worker
+	// machine families, a restore-spec validation change, or an old image.
+	// Infrastructure-domain: atelet falls back to a cold boot from the
+	// snapshot's filesystem image when one is present (see
+	// RestoreResponse.restored_via_filesystem_fallback) instead of crashing
+	// the actor.
+	ReasonRestoreIncompatible Reason = "RESTORE_INCOMPATIBLE"
+
 	// Control-plane failure reasons for ate.actor.crashes metric.
 	ReasonCorruptedAssignment Reason = "CORRUPTED_ASSIGNMENT"
 	ReasonWorkerReassigned    Reason = "WORKER_REASSIGNED"
@@ -88,6 +98,7 @@ var AllReasons = []Reason{
 	ReasonInvalidContainerConfig,
 	ReasonLocalSnapshotGone,
 	ReasonWorkloadNotReady,
+	ReasonRestoreIncompatible,
 	ReasonCorruptedAssignment,
 	ReasonWorkerReassigned,
 	ReasonWorkerPodGone,

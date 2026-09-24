@@ -141,6 +141,9 @@ func ActorStateValue(state ateapipb.ActorState) string {
 // ImageCacheOutcomeKey is rooted at the subsystem, not under actor: the layer
 // pool is node state every actor shares. For the same reason it is the only
 // ate.* label on its counter.
+// RestoreFallbackKey is present only on a restore that actually fell back
+// (its absence, not a "none" value, means the normal path ran), so it never
+// widens the label set of the common case.
 const (
 	ActorOperationNameKey   = attribute.Key("ate.actor.operation.name")
 	WorkerPoolNamespaceKey  = attribute.Key("ate.workerpool.namespace")
@@ -158,6 +161,7 @@ const (
 	FailureReasonKey        = attribute.Key("ate.failure.reason")
 	FailureDomainKey        = attribute.Key("ate.failure.domain")
 	StatsSourceKey          = attribute.Key("ate.stats.source")
+	RestoreFallbackKey      = attribute.Key("ate.restore.fallback")
 )
 
 // Values for FailureDomainKey. A strict function of the reason, so it costs no
@@ -352,6 +356,11 @@ func SnapshotScopeValue(scope ateletpb.SnapshotScope) string {
 		return SnapshotScopeUnknown
 	}
 }
+
+// Values for RestoreFallbackKey. The only fallback today is a Full restore
+// whose memory restore failed, recovered by cold-booting from the snapshot's
+// filesystem image.
+const RestoreFallbackFilesystem = "full_to_filesystem"
 
 // Values for SnapshotPhaseKey. Phases overlap (the download runs concurrently
 // with the asset fetch and OCI unpack), so they are independent observations,
