@@ -381,3 +381,42 @@ func TestDialForAteletOnNode(t *testing.T) {
 		}
 	})
 }
+
+func TestDialAnyAtelet(t *testing.T) {
+	ateletPod := func(name, uid, node, ip string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ate-system", Name: name, UID: types.UID(uid)},
+			Spec:       corev1.PodSpec{NodeName: node},
+			Status:     corev1.PodStatus{PodIPs: []corev1.PodIP{{IP: ip}}},
+		}
+	}
+
+	t.Run("no atelet pods available", func(t *testing.T) {
+		d := NewAteletDialer(newTestAteletIndexer(t), "", "")
+		if _, err := d.DialAnyAtelet(); !errors.Is(err, ErrNoAteletOnNode) {
+			t.Fatalf("DialAnyAtelet = %v, want ErrNoAteletOnNode", err)
+		}
+	})
+
+	t.Run("dials an atelet regardless of node", func(t *testing.T) {
+		d := NewAteletDialer(newTestAteletIndexer(t,
+			ateletPod("atelet-1", "uid-1", "node1", "10.0.0.1"),
+		), "", "", WithDialCredentials(func(string) (credentials.TransportCredentials, error) {
+			return insecure.NewCredentials(), nil
+		}))
+
+		conn, err := d.DialAnyAtelet()
+		if err != nil {
+			t.Fatalf("DialAnyAtelet: %v", err)
+		}
+		// Same underlying dial/cache path as DialForAteletOnNode: a second
+		// call for the same (only) pod returns the cached connection.
+		again, err := d.DialForAteletOnNode("node1")
+		if err != nil {
+			t.Fatalf("DialForAteletOnNode: %v", err)
+		}
+		if again != conn {
+			t.Error("DialForAteletOnNode returned a different connection than DialAnyAtelet cached, want the same one")
+		}
+	})
+}

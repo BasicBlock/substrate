@@ -278,13 +278,14 @@ const (
 // Values for ActorOperationNameKey: the actor lifecycle operations ateapi
 // serves.
 const (
-	OperationCreate  = "create"
-	OperationResume  = "resume"
-	OperationSuspend = "suspend"
-	OperationPause   = "pause"
-	OperationDelete  = "delete"
-	OperationRevert  = "revert"
-	OperationUnknown = "unknown"
+	OperationCreate             = "create"
+	OperationResume             = "resume"
+	OperationSuspend            = "suspend"
+	OperationPause              = "pause"
+	OperationDelete             = "delete"
+	OperationRevert             = "revert"
+	OperationDropSnapshotMemory = "drop_snapshot_memory"
+	OperationUnknown            = "unknown"
 )
 
 // AllOperations lists all registered bounded actor lifecycle operations.
@@ -295,6 +296,7 @@ var AllOperations = []string{
 	OperationPause,
 	OperationDelete,
 	OperationRevert,
+	OperationDropSnapshotMemory,
 }
 
 // NormalizeOperationName ensures op is one of the bounded lifecycle operations.

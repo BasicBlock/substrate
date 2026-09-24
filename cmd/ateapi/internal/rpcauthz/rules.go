@@ -104,6 +104,9 @@ var rules = map[string]rule{
 	// client's can_connect, and would otherwise reveal whether a token is valid.
 	ateapipb.Control_CheckActorAccess_FullMethodName: global("owner"),
 	ateapipb.Control_DeleteActor_FullMethodName:      onActor[*ateapipb.DeleteActorRequest]("can_delete"),
+	// Dropping a snapshot's memory is a snapshot-management operation on the
+	// actor's stored state, the same authority as suspending it.
+	ateapipb.Control_DropSnapshotMemory_FullMethodName: onActor[*ateapipb.DropSnapshotMemoryRequest]("can_suspend"),
 
 	ateapipb.Control_GetActorEgressPolicy_FullMethodName:    onActor[*ateapipb.GetActorEgressPolicyRequest]("can_get"),
 	ateapipb.Control_CreateActorEgressPolicy_FullMethodName: onActor[*ateapipb.CreateActorEgressPolicyRequest]("can_update"),

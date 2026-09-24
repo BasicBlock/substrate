@@ -1188,13 +1188,27 @@ func TestLoadActorForResume_RunningActorShortCircuits(t *testing.T) {
 type capturingAtelet struct {
 	ateletpb.UnimplementedAteomHerderServer
 
-	mu      sync.Mutex
-	restore *ateletpb.RestoreRequest
-	run     *ateletpb.RunRequest
+	mu                 sync.Mutex
+	restore            *ateletpb.RestoreRequest
+	run                *ateletpb.RunRequest
+	dropSnapshotMemory *ateletpb.DropSnapshotMemoryRequest
 	// restoredViaFilesystemFallback is echoed on every Restore response, so a
 	// test can simulate atelet reporting a Full-restore-to-Filesystem
 	// fallback (see ateletpb.RestoreResponse's field doc).
 	restoredViaFilesystemFallback bool
+	// dropSnapshotMemoryErr, when set, is returned by DropSnapshotMemory
+	// instead of a success response.
+	dropSnapshotMemoryErr error
+}
+
+func (f *capturingAtelet) DropSnapshotMemory(ctx context.Context, req *ateletpb.DropSnapshotMemoryRequest) (*ateletpb.DropSnapshotMemoryResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropSnapshotMemory = proto.Clone(req).(*ateletpb.DropSnapshotMemoryRequest)
+	if f.dropSnapshotMemoryErr != nil {
+		return nil, f.dropSnapshotMemoryErr
+	}
+	return &ateletpb.DropSnapshotMemoryResponse{}, nil
 }
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
@@ -1225,6 +1239,17 @@ func (f *capturingAtelet) requests() (*ateletpb.RestoreRequest, *ateletpb.RunReq
 		run = proto.Clone(f.run).(*ateletpb.RunRequest)
 	}
 	return restore, run
+}
+
+// droppedSnapshotMemory returns the recorded DropSnapshotMemory request, nil
+// if it was never called.
+func (f *capturingAtelet) droppedSnapshotMemory() *ateletpb.DropSnapshotMemoryRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dropSnapshotMemory == nil {
+		return nil
+	}
+	return proto.Clone(f.dropSnapshotMemory).(*ateletpb.DropSnapshotMemoryRequest)
 }
 
 // wireTestAssignment is the worker assignment matching the pods
