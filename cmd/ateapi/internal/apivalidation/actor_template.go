@@ -237,14 +237,15 @@ func ValidateCustom_SnapshotConfig_StorageLocation(_ context.Context, _ operatio
 	return nil
 }
 
-// snapshotContentScopeRank orders SnapshotContentScope by how much content it
+// SnapshotContentScopeRank orders SnapshotContentScope by how much content it
 // captures. The wire values (FULL=1, DATA=2, FILESYSTEM=3) are not in
 // containment order -- FULL ⊇ FILESYSTEM ⊇ DATA -- so on_commit ⊆ on_pause
-// must compare ranks, not the raw enum values. ok is false for UNSPECIFIED
-// and any value outside the enum: required/minimum/maximum tags reject those
-// independently, and comparing a rank against a meaningless value would only
-// add a confusing second error.
-func snapshotContentScopeRank(s ateapipb.SnapshotContentScope) (rank int, ok bool) {
+// (and a workflow decision like whether a paused-origin suspend can produce
+// the template's commit scope) must compare ranks, not the raw enum values.
+// ok is false for UNSPECIFIED and any value outside the enum:
+// required/minimum/maximum tags reject those independently, and comparing a
+// rank against a meaningless value would only add a confusing second error.
+func SnapshotContentScopeRank(s ateapipb.SnapshotContentScope) (rank int, ok bool) {
 	switch s {
 	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL:
 		return 3, true
@@ -260,8 +261,8 @@ func snapshotContentScopeRank(s ateapipb.SnapshotContentScope) (rank int, ok boo
 // ValidateCustom_SnapshotConfig requires on_commit to be contained in
 // on_pause, per FULL ⊇ FILESYSTEM ⊇ DATA.
 func ValidateCustom_SnapshotConfig(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.SnapshotConfig) field.ErrorList {
-	pauseRank, pauseOK := snapshotContentScopeRank(value.GetOnPause())
-	commitRank, commitOK := snapshotContentScopeRank(value.GetOnCommit())
+	pauseRank, pauseOK := SnapshotContentScopeRank(value.GetOnPause())
+	commitRank, commitOK := SnapshotContentScopeRank(value.GetOnCommit())
 	if !pauseOK || !commitOK {
 		return nil
 	}
