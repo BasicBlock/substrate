@@ -16,6 +16,7 @@ package ategcs
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -74,4 +75,23 @@ func (s *s3Client) PutObject(ctx context.Context, bucket, object string, reader 
 		Body:   reader,
 	})
 	return err
+}
+
+// DeleteObject removes one object. S3's own DeleteObject is already
+// idempotent (deleting an absent key is not an error), but objectAbsent is
+// still checked so a differently-behaving endpoint (e.g. a compatible but not
+// identical object store) still reports ErrObjectNotFound rather than a raw
+// error DeleteIfExists would not recognize.
+func (s *s3Client) DeleteObject(ctx context.Context, bucket, object string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(object),
+	})
+	if err != nil {
+		if objectAbsent(err) {
+			return fmt.Errorf("%w: Bucket:%q, Object:%q: %w", ErrObjectNotFound, bucket, object, err)
+		}
+		return fmt.Errorf("while deleting S3 object %q: %w", object, err)
+	}
+	return nil
 }

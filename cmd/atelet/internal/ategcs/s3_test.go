@@ -98,3 +98,38 @@ func TestS3GetObjectClassifiesAbsence(t *testing.T) {
 		})
 	}
 }
+
+// TestS3DeleteObjectClassifiesAbsence mirrors
+// TestS3GetObjectClassifiesAbsence for DeleteObject: a missing key or bucket
+// wraps ErrObjectNotFound so DeleteIfExists can treat it as success.
+func TestS3DeleteObjectClassifiesAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		wantAbsent bool
+	}{
+		{
+			name:       "NoSuchKey is absence",
+			status:     http.StatusNotFound,
+			body:       `<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`,
+			wantAbsent: true,
+		},
+		{
+			name:       "AccessDenied is not absence",
+			status:     http.StatusForbidden,
+			body:       `<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`,
+			wantAbsent: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s3ErrorClient(t, tc.status, tc.body).DeleteObject(context.Background(), "bkt", "obj")
+			if err == nil {
+				t.Fatal("DeleteObject succeeded, want an error")
+			}
+			if got := errors.Is(err, ErrObjectNotFound); got != tc.wantAbsent {
+				t.Errorf("errors.Is(err, ErrObjectNotFound) = %v, want %v (err: %v)", got, tc.wantAbsent, err)
+			}
+		})
+	}
+}
