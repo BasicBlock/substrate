@@ -94,6 +94,11 @@ class ControlStub:
                 request_serializer=ateapi__pb2.DeleteActorRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.Actor.FromString,
                 _registered_method=True)
+        self.DropSnapshotMemory = channel.unary_unary(
+                '/ateapi.Control/DropSnapshotMemory',
+                request_serializer=ateapi__pb2.DropSnapshotMemoryRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.DropSnapshotMemoryResponse.FromString,
+                _registered_method=True)
         self.GetActorEgressPolicy = channel.unary_unary(
                 '/ateapi.Control/GetActorEgressPolicy',
                 request_serializer=ateapi__pb2.GetActorEgressPolicyRequest.SerializeToString,
@@ -300,6 +305,19 @@ class ControlServicer:
 
     def DeleteActor(self, request, context):
         """Delete an actor. Only suspended actors can be deleted.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DropSnapshotMemory(self, request, context):
+        """DropSnapshotMemory converts a SUSPENDED actor's stored Full snapshot into
+        a Filesystem one in place: the recorded scope updates and the snapshot's
+        memory objects are deleted from storage, keeping its filesystem image and
+        durable data. Idempotent; refuses an actor that is not SUSPENDED or whose
+        snapshot has no filesystem image to fall back to. Intended for a
+        long-suspended actor (e.g. a workspace idle for days) whose memory
+        snapshot's storage cost is no longer worth a hot-memory restore.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -555,6 +573,11 @@ def add_ControlServicer_to_server(servicer, server):
                     servicer.DeleteActor,
                     request_deserializer=ateapi__pb2.DeleteActorRequest.FromString,
                     response_serializer=ateapi__pb2.Actor.SerializeToString,
+            ),
+            'DropSnapshotMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.DropSnapshotMemory,
+                    request_deserializer=ateapi__pb2.DropSnapshotMemoryRequest.FromString,
+                    response_serializer=ateapi__pb2.DropSnapshotMemoryResponse.SerializeToString,
             ),
             'GetActorEgressPolicy': grpc.unary_unary_rpc_method_handler(
                     servicer.GetActorEgressPolicy,
@@ -936,6 +959,33 @@ class Control:
             '/ateapi.Control/DeleteActor',
             ateapi__pb2.DeleteActorRequest.SerializeToString,
             ateapi__pb2.Actor.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DropSnapshotMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/DropSnapshotMemory',
+            ateapi__pb2.DropSnapshotMemoryRequest.SerializeToString,
+            ateapi__pb2.DropSnapshotMemoryResponse.FromString,
             options,
             channel_credentials,
             insecure,

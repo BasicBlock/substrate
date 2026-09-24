@@ -57,6 +57,15 @@ service Control {
   // Delete an actor. Only suspended actors can be deleted.
   rpc DeleteActor(DeleteActorRequest) returns (Actor) {}
 
+  // DropSnapshotMemory converts a SUSPENDED actor's stored Full snapshot into
+  // a Filesystem one in place: the recorded scope updates and the snapshot's
+  // memory objects are deleted from storage, keeping its filesystem image and
+  // durable data. Idempotent; refuses an actor that is not SUSPENDED or whose
+  // snapshot has no filesystem image to fall back to. Intended for a
+  // long-suspended actor (e.g. a workspace idle for days) whose memory
+  // snapshot's storage cost is no longer worth a hot-memory restore.
+  rpc DropSnapshotMemory(DropSnapshotMemoryRequest) returns (DropSnapshotMemoryResponse) {}
+
   // Get the egress policy resource nested under an Actor.
   rpc GetActorEgressPolicy(GetActorEgressPolicyRequest) returns (EgressPolicy) {}
 
@@ -1465,6 +1474,16 @@ message DeleteActorRequest {
   //
   // +k8s:optional
   bool any_state = 2;
+}
+
+message DropSnapshotMemoryRequest {
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
+  ObjectRef actor = 1;
+}
+
+message DropSnapshotMemoryResponse {
+  Actor actor = 1;
 }
 
 // GetActorEgressPolicyRequest identifies an Actor's egress policy.

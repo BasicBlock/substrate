@@ -200,6 +200,7 @@ const (
 	AteomHerder_Restore_FullMethodName                = "/atelet.AteomHerder/Restore"
 	AteomHerder_UploadPausedCheckpoint_FullMethodName = "/atelet.AteomHerder/UploadPausedCheckpoint"
 	AteomHerder_Terminate_FullMethodName              = "/atelet.AteomHerder/Terminate"
+	AteomHerder_DropSnapshotMemory_FullMethodName     = "/atelet.AteomHerder/DropSnapshotMemory"
 )
 
 // AteomHerderClient is the client API for AteomHerder service.
@@ -228,6 +229,15 @@ type AteomHerderClient interface {
 	// Terminate tells atelet to terminate/kill any running workload for an actor,
 	// unmount its volumes, and clean up actor state on the node.
 	Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error)
+	// DropSnapshotMemory rewrites a stored external Full snapshot in place into
+	// a Filesystem one: it deletes the memory checkpoint's objects and rewrites
+	// the manifest to list only the filesystem image and durable data, keeping
+	// both. Drives no ateom -- this is pure object-storage rewriting, so any
+	// atelet can serve it, not only one on the actor's (long gone) node. Refuses
+	// a snapshot that is not Full scope, or that has no filesystem image (it
+	// predates FILESYSTEM-scope support). Idempotent: a snapshot already scoped
+	// Filesystem succeeds without rewriting anything.
+	DropSnapshotMemory(ctx context.Context, in *DropSnapshotMemoryRequest, opts ...grpc.CallOption) (*DropSnapshotMemoryResponse, error)
 }
 
 type ateomHerderClient struct {
@@ -288,6 +298,16 @@ func (c *ateomHerderClient) Terminate(ctx context.Context, in *TerminateRequest,
 	return out, nil
 }
 
+func (c *ateomHerderClient) DropSnapshotMemory(ctx context.Context, in *DropSnapshotMemoryRequest, opts ...grpc.CallOption) (*DropSnapshotMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DropSnapshotMemoryResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_DropSnapshotMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AteomHerderServer is the server API for AteomHerder service.
 // All implementations must embed UnimplementedAteomHerderServer
 // for forward compatibility.
@@ -314,6 +334,15 @@ type AteomHerderServer interface {
 	// Terminate tells atelet to terminate/kill any running workload for an actor,
 	// unmount its volumes, and clean up actor state on the node.
 	Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error)
+	// DropSnapshotMemory rewrites a stored external Full snapshot in place into
+	// a Filesystem one: it deletes the memory checkpoint's objects and rewrites
+	// the manifest to list only the filesystem image and durable data, keeping
+	// both. Drives no ateom -- this is pure object-storage rewriting, so any
+	// atelet can serve it, not only one on the actor's (long gone) node. Refuses
+	// a snapshot that is not Full scope, or that has no filesystem image (it
+	// predates FILESYSTEM-scope support). Idempotent: a snapshot already scoped
+	// Filesystem succeeds without rewriting anything.
+	DropSnapshotMemory(context.Context, *DropSnapshotMemoryRequest) (*DropSnapshotMemoryResponse, error)
 	mustEmbedUnimplementedAteomHerderServer()
 }
 
@@ -338,6 +367,9 @@ func (UnimplementedAteomHerderServer) UploadPausedCheckpoint(context.Context, *U
 }
 func (UnimplementedAteomHerderServer) Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Terminate not implemented")
+}
+func (UnimplementedAteomHerderServer) DropSnapshotMemory(context.Context, *DropSnapshotMemoryRequest) (*DropSnapshotMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DropSnapshotMemory not implemented")
 }
 func (UnimplementedAteomHerderServer) mustEmbedUnimplementedAteomHerderServer() {}
 func (UnimplementedAteomHerderServer) testEmbeddedByValue()                     {}
@@ -450,6 +482,24 @@ func _AteomHerder_Terminate_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AteomHerder_DropSnapshotMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DropSnapshotMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).DropSnapshotMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_DropSnapshotMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).DropSnapshotMemory(ctx, req.(*DropSnapshotMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AteomHerder_ServiceDesc is the grpc.ServiceDesc for AteomHerder service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -476,6 +526,10 @@ var AteomHerder_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Terminate",
 			Handler:    _AteomHerder_Terminate_Handler,
+		},
+		{
+			MethodName: "DropSnapshotMemory",
+			Handler:    _AteomHerder_DropSnapshotMemory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
