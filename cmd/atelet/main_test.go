@@ -49,6 +49,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -1641,6 +1642,9 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "gone and no uploaded copy exists") {
 			t.Errorf("error = %v, want it to name the unrecoverable local snapshot", err)
+		}
+		if got := status.Code(err); got != codes.NotFound {
+			t.Errorf("code = %v, want NotFound, the one code the control plane crashes on", got)
 		}
 	})
 
