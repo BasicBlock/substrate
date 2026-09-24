@@ -72,6 +72,9 @@ func TestApplyToOCISpec(t *testing.T) {
 	if mem == nil || mem.Limit == nil || *mem.Limit != 1073741824 {
 		t.Errorf("memory limit not set correctly: %+v", mem)
 	}
+	if got := spec.Linux.Resources.Unified["memory.high"]; got != "1073741824" {
+		t.Errorf("memory.high = %q, want 1073741824", got)
+	}
 }
 
 func TestApplyToOCISpecPreservesExistingAndSkipsUnset(t *testing.T) {
@@ -92,6 +95,9 @@ func TestApplyToOCISpecPreservesExistingAndSkipsUnset(t *testing.T) {
 	if spec.Linux.Resources.Memory == nil || *spec.Linux.Resources.Memory.Limit != 512 {
 		t.Error("memory limit not applied")
 	}
+	if spec.Linux.Resources.Unified["memory.high"] != "512" {
+		t.Error("memory.high not applied")
+	}
 }
 
 func TestApplyToOCISpecNoopWhenEmpty(t *testing.T) {
@@ -99,5 +105,16 @@ func TestApplyToOCISpecNoopWhenEmpty(t *testing.T) {
 	(SandboxSize{}).ApplyToOCISpec(spec)
 	if spec.Linux != nil {
 		t.Error("empty SandboxSize mutated spec")
+	}
+}
+
+func TestApplyToOCISpecKeepsOtherUnifiedValues(t *testing.T) {
+	spec := &specs.Spec{Linux: &specs.Linux{Resources: &specs.LinuxResources{
+		Unified: map[string]string{"pids.max": "100"},
+	}}}
+	(SandboxSize{MemoryBytes: 2048}).ApplyToOCISpec(spec)
+
+	if spec.Linux.Resources.Unified["pids.max"] != "100" || spec.Linux.Resources.Unified["memory.high"] != "2048" {
+		t.Errorf("unified = %v", spec.Linux.Resources.Unified)
 	}
 }

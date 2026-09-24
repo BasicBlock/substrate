@@ -618,6 +618,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
 		return nil, fmt.Errorf("while creating pause container: %w", err)
 	}
+	liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 	if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
 		return nil, fmt.Errorf("while starting pause container: %w", err)
 	}
@@ -999,6 +1000,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 		if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
 			return nil, fmt.Errorf("while starting pause container: %w", err)
 		}
@@ -1018,6 +1020,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 		if err := rcmd.cmdRestore(ctx, os.Stdout, ocispec.PauseContainer, checkpointDir); err != nil {
 			return nil, fmt.Errorf("while restoring pause container: %w", err)
 		}

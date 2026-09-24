@@ -23,6 +23,8 @@
 package sizing
 
 import (
+	"strconv"
+
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -75,6 +77,14 @@ func (s SandboxSize) VCPUs() int {
 // the gVisor sandbox-cgroup path: only ateom-gvisor calls it, so runsc applies the
 // result to the host cgroup leaf. Fields that are unset in SandboxSize are left
 // untouched, preserving any existing values on the spec.
+//
+// Memory is written as both memory.max and memory.high. runsc reads memory.max
+// when it boots the sentry, to set the total memory the guest reports; ateom
+// then lifts it (liftSandboxMemoryMax), because at memory.max the kernel fails
+// the sentry's memory-file allocations, which kills guest processes. Above
+// memory.high the kernel throttles the sandbox and reclaims its memory instead,
+// swapping where the worker pod has swap, and the worker pod's own limit stays
+// the hard bound.
 func (s SandboxSize) ApplyToOCISpec(spec *specs.Spec) {
 	if s.MilliCPU <= 0 && s.MemoryBytes <= 0 {
 		return
@@ -100,5 +110,9 @@ func (s SandboxSize) ApplyToOCISpec(spec *specs.Spec) {
 		}
 		limit := s.MemoryBytes
 		spec.Linux.Resources.Memory.Limit = &limit
+		if spec.Linux.Resources.Unified == nil {
+			spec.Linux.Resources.Unified = map[string]string{}
+		}
+		spec.Linux.Resources.Unified["memory.high"] = strconv.FormatInt(s.MemoryBytes, 10)
 	}
 }
