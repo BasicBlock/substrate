@@ -560,6 +560,14 @@ Removes an actor from the registry and cleans up associated resources.
 *   **Response:** the deleted `Actor`, as it was immediately before removal.
 *   Deleting an actor also deletes the external snapshot it owns, along with one an interrupted suspend left behind. Snapshots it only borrows from a tag are left alone, and its tags are unaffected — they hold their own copies.
 
+#### `DropSnapshotMemory`
+Converts a `SUSPENDED` actor's stored `Full` snapshot into a `Filesystem` one in place, authorized like `SuspendActor`/`DeleteActor` for the actor's atespace.
+*   **Request:** `DropSnapshotMemoryRequest`
+    *   `actor`: `ObjectRef` of the actor to narrow.
+*   **Response:** `DropSnapshotMemoryResponse` containing the `Actor`, whose `status.externalSnapshot.contentScope` is now `SNAPSHOT_CONTENT_SCOPE_FILESYSTEM`.
+*   **Errors:** `FAILED_PRECONDITION` if the actor is not `SUSPENDED`, has no external snapshot, or that snapshot's captured scope is not `Full`, or is `Full` but was captured without a filesystem image (predates `Filesystem`-scope support, or its capture-time filesystem checkpoint failed — see [the glossary](glossary.md#snapshots)).
+*   Idempotent: an already-`Filesystem` snapshot succeeds without changes. The actor's next `ResumeActor` cold-boots its containers from the snapshot's filesystem image and durable data instead of restoring guest memory. Intended for a long-suspended actor (e.g. a development workspace idle for days) whose memory snapshot's storage cost is no longer worth a hot-memory restore. `kubectl-ate drop snapshot-memory <actor> -a <atespace>` calls this RPC.
+
 #### `GetActor` / `ListActors`
 Query the state of logical actors.
 *   **GetActor:** Retrieves a single actor by ID.

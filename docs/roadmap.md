@@ -79,7 +79,7 @@ Below is a collection of finer-grained efforts which we believe align with the a
 * Storage and visualization for benchmark results
 * Integrate debugging into load tests
 * State Store Scale: PostgreSQL scaling and partitioning support to enable management of 1M+ concurrent actors.
-* Disk-Only Resume Policy: Support for cost-optimized hibernation where only the filesystem state is preserved, skipping the RAM restore for stateless or "cold" start-capable agents.
+* Disk-Only Resume Policy: the underlying mechanism now exists — the `Filesystem` snapshot scope (gVisor only; see [glossary.md](glossary.md#snapshots) and [api-guide.md](api-guide.md#dropsnapshotmemory)) captures rootfs plus durable data without process memory, a `Full` snapshot's memory restore fails over to it automatically, and `DropSnapshotMemory` narrows an existing `Full` snapshot into one after the fact. Still open: an automated *policy* that chooses `Filesystem` scope for stateless/cold-start-capable agents (today it is an explicit `ActorTemplate` or operator choice) and extending it beyond gVisor to micro-VM.
 
 ### Testing
 

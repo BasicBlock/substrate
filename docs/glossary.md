@@ -89,7 +89,10 @@ for etcd.
   where the snapshots are persisted.
 
 - **Resume**: activate a suspended/paused Actor by restoring it onto a Worker. The
-  common path restores from a snapshot rather than cold-booting.
+  common path restores from a snapshot rather than cold-booting. If a `Full`
+  snapshot's memory restore fails and the snapshot carries a `Filesystem`-scope
+  image (see [Snapshot scope](#snapshots)), the Actor falls back to a cold
+  boot from that image instead of failing the Resume.
 
 ## Volumes
 
@@ -109,10 +112,25 @@ for etcd.
 ## Snapshots
 
 - **Snapshot scope**: what an `ActorTemplate`'s `SnapshotConfig` includes
-  in a given snapshot. Two scopes exist today:
+  in a given snapshot. Three scopes exist today, in containment order
+  `Full` ⊇ `Filesystem` ⊇ `Data`:
   - **`Full`**: process memory plus the rootfs delta on top of the OCI
     image, and any attached `DurableDir` volumes. Used to capture
-    everything needed to resume hot.
+    everything needed to resume hot. On a `gvisor` `ActorTemplate` a `Full`
+    checkpoint also carries a `Filesystem`-scope image alongside the memory
+    checkpoint (best-effort: gVisor's filesystem checkpoint is
+    experimental, so its failure does not fail the memory checkpoint), so a
+    memory restore that fails can cold-boot from it instead of crashing the
+    Actor — see the Resume entry below. A `Full` snapshot captured before
+    this existed, or whose filesystem capture failed, has no such image and
+    keeps the older, crash-on-failure behavior.
+  - **`Filesystem`** (`gvisor` only): the rootfs delta on top of the OCI
+    image plus any attached `DurableDir` volumes, without process memory.
+    Resuming from it is a cold boot of the containers from the image with
+    that filesystem restored — like a VM reboot that keeps its disk —
+    rather than a memory restore, so it is portable across worker
+    CPU/machine families where a `Full` restore can fail (an incompatible
+    CPU feature set, a restore-spec validation change, an old image).
   - **`Data`**: only the contents of attached volumes that support
     snapshots — currently `DurableDir` volumes. Process memory and the
     rest of rootfs are discarded. Used to persist application data
@@ -125,8 +143,18 @@ for etcd.
   per-trigger via `onPause` and `onCommit`: `onPause` selects what is
   captured during a [Pause](#lifecycle) (kept on the node), and
   `onCommit` selects what is captured during a [Suspend](#lifecycle)
-  (uploaded to snapshot storage). `onCommit` must be a subset of
-  `onPause`.
+  (uploaded to snapshot storage). `onCommit` must be contained in
+  `onPause` per the `Full` ⊇ `Filesystem` ⊇ `Data` order above.
+
+  A SUSPENDED Actor's stored `Full` snapshot can also be narrowed to
+  `Filesystem` after the fact, independent of `onCommit`: the
+  `DropSnapshotMemory` RPC (`kubectl-ate drop snapshot-memory`) rewrites the
+  snapshot's manifest in place and deletes its memory objects, keeping the
+  filesystem image and durable data. Idempotent; refuses an Actor that is
+  not SUSPENDED or whose snapshot has no filesystem image to fall back to.
+  Intended for a long-suspended Actor (e.g. a development workspace idle
+  for days) whose memory snapshot's storage cost is no longer worth a
+  hot-memory restore.
 
 - **Resume sources**: an `ActorTemplate`'s `onResume` block selects, per
   snapshot situation, what supplies the guest state on Resume. Each field
