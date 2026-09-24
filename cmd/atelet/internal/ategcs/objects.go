@@ -41,6 +41,25 @@ var ErrObjectNotFound = errors.New("object not found in storage backend")
 type ObjectStorage interface {
 	GetObject(ctx context.Context, bucket, object string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, bucket, object string, reader io.Reader) error
+	// DeleteObject removes one object, wrapping ErrObjectNotFound (via %w) if
+	// it does not exist.
+	DeleteObject(ctx context.Context, bucket, object string) error
+}
+
+// ErrObjectNotFound is wrapped by DeleteObject when the object does not
+// exist.
+var ErrObjectNotFound = errors.New("object not found")
+
+// DeleteIfExists calls client.DeleteObject and swallows ErrObjectNotFound, so
+// a caller can retry a partially-completed delete pass without special-casing
+// which objects already went -- safe because every delete here targets a
+// specific, already-identified object name, never a wildcard.
+func DeleteIfExists(ctx context.Context, client ObjectStorage, bucket, object string) error {
+	err := client.DeleteObject(ctx, bucket, object)
+	if err == nil || errors.Is(err, ErrObjectNotFound) {
+		return nil
+	}
+	return err
 }
 
 func FetchFromGCS(ctx context.Context, client ObjectStorage, gsURL string) ([]byte, error) {

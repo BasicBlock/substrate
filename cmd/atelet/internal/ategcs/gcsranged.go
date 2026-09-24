@@ -42,6 +42,18 @@ func (g *gcsClient) GetObject(ctx context.Context, bucket, object string) (io.Re
 	return newRangedReader(ctx, size, head, g.fetchRange(bucket, object)), nil
 }
 
+// DeleteObject removes one object, wrapping ErrObjectNotFound if it is
+// already gone.
+func (g *gcsClient) DeleteObject(ctx context.Context, bucket, object string) error {
+	if err := g.client.Bucket(bucket).Object(object).Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) || errors.Is(err, storage.ErrBucketNotExist) {
+			return fmt.Errorf("%w: Bucket:%q, Object:%q: %w", ErrObjectNotFound, bucket, object, err)
+		}
+		return fmt.Errorf("while deleting GCS object %q: %w", object, err)
+	}
+	return nil
+}
+
 // fetchRange reads one range with a pooled client, so concurrent ranges do not all
 // multiplex onto the one HTTP/2 connection a single storage.Client holds.
 func (g *gcsClient) fetchRange(bucket, object string) fetchRangeFunc {

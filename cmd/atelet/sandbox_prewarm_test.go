@@ -324,6 +324,8 @@ func (hangingObjectStorage) GetObject(ctx context.Context, _, _ string) (io.Read
 
 func (hangingObjectStorage) PutObject(_ context.Context, _, _ string, _ io.Reader) error { return nil }
 
+func (hangingObjectStorage) DeleteObject(_ context.Context, _, _ string) error { return nil }
+
 // TestPrewarmTimeout verifies a single prewarm attempt is bounded by
 // prewarmTimeout: the queue has one worker, so an attempt that never returned
 // would block every other config's prewarm.
