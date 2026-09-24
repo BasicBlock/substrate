@@ -131,6 +131,16 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	return actor, true, nil
 }
 
+// logRestoredViaFilesystemFallback surfaces atelet's Full-restore-to-Filesystem
+// fallback at the control-plane layer (see ateletpb.RestoreResponse's field
+// doc and ateattr.RestoreFallbackKey), so it is visible in the actor's own log
+// stream and correlatable across the fleet, not only in the single node's
+// atelet logs.
+func logRestoredViaFilesystemFallback(ctx context.Context, actorRef resources.ActorRef) {
+	slog.LogAttrs(ctx, slog.LevelWarn, "Actor resumed via a filesystem-image fallback after its Full restore failed",
+		ateattr.ActorRefLogAttrs(actorRef)...)
+}
+
 // validateGoldenSnapshotScope rejects a golden snapshot that does not carry
 // the guest state (memory + fs delta) a restore needs. Golden actors always
 // commit Full (commitSnapshotScope), so this only trips on golden snapshots
@@ -661,8 +671,13 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		req.Scope = actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause())
 		tele.WireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)
 
-		if _, err = client.Restore(ctx, req); err != nil {
+		var resp *ateletpb.RestoreResponse
+		if resp, err = client.Restore(ctx, req); err != nil {
 			return tele, handleAteletError(ctx, w.store, actorRef, ateattr.OperationResume, "Restore", false, err)
+		}
+		if resp.GetRestoredViaFilesystemFallback() {
+			logRestoredViaFilesystemFallback(ctx, actorRef)
+			tele.WireSnapshotScope = ateattr.SnapshotScopeFilesystem
 		}
 		return tele, nil
 	} else if !src.SnapshotURI.IsZero() {
@@ -693,8 +708,13 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			CpuMilli:      cpuMilli,
 			MemoryBytes:   memBytes,
 		}
-		if _, err = client.Restore(ctx, req); err != nil {
+		var resp *ateletpb.RestoreResponse
+		if resp, err = client.Restore(ctx, req); err != nil {
 			return tele, handleAteletError(ctx, w.store, actorRef, ateattr.OperationResume, "Restore", false, err)
+		}
+		if resp.GetRestoredViaFilesystemFallback() {
+			logRestoredViaFilesystemFallback(ctx, actorRef)
+			tele.WireSnapshotScope = ateattr.SnapshotScopeFilesystem
 		}
 		return tele, nil
 	} else {
