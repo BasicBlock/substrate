@@ -1202,8 +1202,13 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
 			}
 		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+			// runsc takes -fs-restore-image-path only for the sandbox's root
+			// (pause) container ("cannot set FSRestoreImagePath when creating
+			// container in existing sandbox"); the sandbox restores each
+			// application container's captured paths, keyed by container
+			// name, as that container is created.
 			containersToDelete = append(containersToDelete, ac.GetName())
-			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), []string{"--fs-restore-image-path", fsRestorePath}); err != nil {
+			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
 				return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
 			}
 			if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
