@@ -46,16 +46,22 @@ type ObjectStorage interface {
 	DeleteObject(ctx context.Context, bucket, object string) error
 }
 
-// DeleteIfExists calls client.DeleteObject and swallows ErrObjectNotFound, so
-// a caller can retry a partially-completed delete pass without special-casing
-// which objects already went -- safe because every delete here targets a
-// specific, already-identified object name, never a wildcard.
-func DeleteIfExists(ctx context.Context, client ObjectStorage, bucket, object string) error {
-	err := client.DeleteObject(ctx, bucket, object)
+// DeleteIfExists deletes the object at gsURL and swallows ErrObjectNotFound,
+// so a caller can retry a partially-completed delete pass without
+// special-casing which objects already went -- safe because every delete
+// here targets a specific, already-identified object, never a wildcard. gsURL
+// is the same form every other helper here takes (FetchFromGCS,
+// SendBytesToGCS, ...), since that is what a caller actually has in hand.
+func DeleteIfExists(ctx context.Context, client ObjectStorage, gsURL string) error {
+	bucket, object, err := parseGCSURL(gsURL)
+	if err != nil {
+		return fmt.Errorf("while parsing url: %w", err)
+	}
+	err = client.DeleteObject(ctx, bucket, object)
 	if err == nil || errors.Is(err, ErrObjectNotFound) {
 		return nil
 	}
-	return err
+	return fmt.Errorf("while deleting object bucket=%q object=%q: %w", bucket, object, err)
 }
 
 func FetchFromGCS(ctx context.Context, client ObjectStorage, gsURL string) ([]byte, error) {
