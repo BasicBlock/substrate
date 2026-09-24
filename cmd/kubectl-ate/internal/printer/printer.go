@@ -320,23 +320,6 @@ func PrintActorTemplateTo(out io.Writer, template *ateapipb.ActorTemplate, forma
 	return PrintActorTemplatesTo(out, []*ateapipb.ActorTemplate{template}, format)
 }
 
-// PrintEgressPolicyTo prints an actor's egress policy. The policy's own
-// metadata names only its atespace, so the caller supplies the actor.
-func PrintEgressPolicyTo(out io.Writer, actor string, policy *ateapipb.EgressPolicy, format string) error {
-	switch format {
-	case "json", "yaml":
-		return printProto(out, policy, format)
-	case "table":
-		w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ATESPACE\tACTOR\tRULES\tAGE")
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", policy.GetMetadata().GetAtespace(), actor,
-			len(policy.GetRules()), formatAge(policy.GetMetadata().GetCreateTime()))
-		return w.Flush()
-	default:
-		return fmt.Errorf("unsupported format %q", format)
-	}
-}
-
 // PrintTagsTo prints a slice of tags to the
 // provided writer.
 func PrintTagsTo(out io.Writer, tags []*ateapipb.Tag, format string) error {

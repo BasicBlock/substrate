@@ -37,6 +37,7 @@ var (
 	getEgressPolicyAtespaceFlag    string
 	createEgressPolicyAtespaceFlag string
 	createEgressPolicyFilenameFlag string
+	deleteEgressPolicyAtespaceFlag string
 )
 
 var getEgressPolicyCmd = &cobra.Command{
@@ -59,6 +60,14 @@ The manifest is a YAML or JSON EgressPolicy, as printed by
 Its metadata may be omitted.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCreateEgressPolicy,
+}
+
+var deleteEgressPolicyCmd = &cobra.Command{
+	Use:     "egress-policy <actor-name>",
+	Aliases: []string{"egress-policies"},
+	Short:   "Delete an actor's egress policy, removing all its egress",
+	Args:    cobra.ExactArgs(1),
+	RunE:    runDeleteEgressPolicy,
 }
 
 // egressPolicyFromManifest parses a single protojson-shaped YAML or JSON
@@ -233,6 +242,42 @@ func runCreateEgressPolicy(cmd *cobra.Command, args []string) error {
 	return runner.Run(ctx)
 }
 
+// egressPolicyDeleter is the Control RPC delete egress-policy calls.
+type egressPolicyDeleter interface {
+	DeleteActorEgressPolicy(ctx context.Context, req *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
+}
+
+// deleteEgressPolicyRunner executes the delete egress-policy command logic.
+type deleteEgressPolicyRunner struct {
+	deleter egressPolicyDeleter
+	actor   *ateapipb.ObjectRef
+	stdout  io.Writer
+}
+
+func (r *deleteEgressPolicyRunner) Run(ctx context.Context) error {
+	if _, err := r.deleter.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{Actor: r.actor}); err != nil {
+		return fmt.Errorf("failed to delete egress policy: %w", err)
+	}
+	fmt.Fprintf(r.stdout, "egress policy of actor %q deleted\n", r.actor.GetName())
+	return nil
+}
+
+func runDeleteEgressPolicy(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	apiClient, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
+	if err != nil {
+		return fmt.Errorf("failed to connect to ate-api-server: %w", err)
+	}
+	defer apiClient.Close()
+
+	runner := &deleteEgressPolicyRunner{
+		deleter: apiClient,
+		actor:   &ateapipb.ObjectRef{Atespace: deleteEgressPolicyAtespaceFlag, Name: args[0]},
+		stdout:  cmd.OutOrStdout(),
+	}
+	return runner.Run(ctx)
+}
+
 func init() {
 	getEgressPolicyCmd.Flags().StringVarP(&getEgressPolicyAtespaceFlag, "atespace", "a", "", "Atespace the actor lives in (required)")
 	_ = getEgressPolicyCmd.MarkFlagRequired("atespace")
@@ -243,4 +288,8 @@ func init() {
 	_ = createEgressPolicyCmd.MarkFlagRequired("atespace")
 	_ = createEgressPolicyCmd.MarkFlagRequired("filename")
 	createCmd.AddCommand(createEgressPolicyCmd)
+
+	deleteEgressPolicyCmd.Flags().StringVarP(&deleteEgressPolicyAtespaceFlag, "atespace", "a", "", "Atespace the actor lives in (required)")
+	_ = deleteEgressPolicyCmd.MarkFlagRequired("atespace")
+	deleteCmd.AddCommand(deleteEgressPolicyCmd)
 }

@@ -17,6 +17,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -652,4 +654,47 @@ rules:
 			}
 		})
 	}
+}
+
+// fakeEgressPolicyDeleter records the request it received and answers with a
+// configured error.
+type fakeEgressPolicyDeleter struct {
+	req *ateapipb.DeleteActorEgressPolicyRequest
+	err error
+}
+
+func (f *fakeEgressPolicyDeleter) DeleteActorEgressPolicy(ctx context.Context, req *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	f.req = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &ateapipb.EgressPolicy{}, nil
+}
+
+func TestDeleteEgressPolicyRunner_Run(t *testing.T) {
+	actor := &ateapipb.ObjectRef{Atespace: "dev-alice", Name: "box"}
+
+	t.Run("deletes the actor's policy", func(t *testing.T) {
+		deleter := &fakeEgressPolicyDeleter{}
+		var out bytes.Buffer
+		runner := &deleteEgressPolicyRunner{deleter: deleter, actor: actor, stdout: &out}
+		if err := runner.Run(context.Background()); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if got := deleter.req.GetActor(); got.GetAtespace() != "dev-alice" || got.GetName() != "box" {
+			t.Errorf("request actor = %v, want dev-alice/box", got)
+		}
+		if got, want := out.String(), "egress policy of actor \"box\" deleted\n"; got != want {
+			t.Errorf("output = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("reports a failed delete", func(t *testing.T) {
+		deleter := &fakeEgressPolicyDeleter{err: status.Error(codes.NotFound, "no such actor")}
+		runner := &deleteEgressPolicyRunner{deleter: deleter, actor: actor, stdout: io.Discard}
+		err := runner.Run(context.Background())
+		if status.Code(errors.Unwrap(err)) != codes.NotFound {
+			t.Errorf("Run() error = %v, want the NotFound it received, wrapped", err)
+		}
+	})
 }
