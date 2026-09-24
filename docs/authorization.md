@@ -125,11 +125,12 @@ from the first of `--ingress-token-headers` present (default
 `ate-authorization`; a `Bearer ` prefix is optional), asks ate-api's
 `CheckActorAccess` whether it authenticates and its principal has
 `can_connect` on the addressed actor (editor of its atespace, or a global
-connector), and only then resumes and routes to the actor. A request without a token that authenticates
-is answered 401, and one without access 403. `audit` logs `Ingress
-authorization would deny request (audit mode)` and forwards it anyway. Token
-headers, and any `--ingress-strip-headers`, are removed before the request
-reaches the actor, which could otherwise replay a client's credential.
+connector), and only then resumes and routes to the actor. A request without a
+token that authenticates is answered 401, and one without access 403. `audit`
+logs `Ingress authorization would deny request (audit mode)` and forwards it
+anyway. Token headers, and any `--ingress-strip-headers`, are removed before
+the request reaches the actor, which could otherwise replay a client's
+credential.
 
 In-cluster clients send their own ServiceAccount token (the Kubernetes
 provider's audience) in `ate-authorization`. Behind Identity-Aware Proxy, put
