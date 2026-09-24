@@ -17,6 +17,7 @@ package ocispec
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -190,11 +191,15 @@ func TestShapeGVisor_Idempotent(t *testing.T) {
 
 // gVisor sizes the container's cgroup leaf from the actor-level limits: one
 // sentry backs every container, so the sandbox cgroup is the only one that
-// binds.
+// binds. memory.high throttles once ateom lifts the boot-time memory.max.
 func TestShapeGVisor_AppliesTheActorSize(t *testing.T) {
 	spec := Build(parityOptions)
 	ShapeGVisor(spec, GVisorOptions{ActorUID: testActorUID, ContainerName: "app", Size: paritySize})
 	if got := *spec.Linux.Resources.Memory.Limit; got != paritySize.MemoryBytes {
 		t.Errorf("memory limit = %d, want %d", got, paritySize.MemoryBytes)
+	}
+	want := strconv.FormatInt(paritySize.MemoryBytes, 10)
+	if got := spec.Linux.Resources.Unified["memory.high"]; got != want {
+		t.Errorf("memory.high = %q, want %s", got, want)
 	}
 }
