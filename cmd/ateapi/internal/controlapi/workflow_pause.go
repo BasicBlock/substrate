@@ -86,7 +86,7 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 	// them here, as crash.go does for the crash counter.
 	finalAttrs = lifecycleOpAttrs(actor, actorTemplate, "", wireSnapshotScope)
 	var finalized *ateapipb.Actor
-	if finalized, err = w.ensurePausedFinalized(leaseCtx, actorRef, actorTemplate); err != nil {
+	if finalized, err = w.ensurePausedFinalized(leaseCtx, actorRef, actorTemplate, actorTemplate.GetSnapshotConfig().GetOnPause()); err != nil {
 		return nil, err
 	}
 	actor = finalized
@@ -210,13 +210,14 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 }
 
 // ensurePausedFinalized releases the actor's worker (only when it is still
-// owned by this actor), records where the local snapshot lives, and commits
-// PAUSED with the assignment cleared in a single update — or CRASHED when the
+// owned by this actor), records where the local snapshot lives and the scope
+// it was captured with, and commits PAUSED with the assignment cleared in a
+// single update — or CRASHED when the
 // worker's node name was lost, since a local snapshot on an unknown node can
 // never be resumed. It re-reads the actor first so an out-of-band transition
 // (e.g. the syncer crashing the actor after its worker died) is not
 // overwritten: with no assignment left there is nothing to finalize.
-func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef resources.ActorRef, actorTemplate *ateapipb.ActorTemplate) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef resources.ActorRef, actorTemplate *ateapipb.ActorTemplate, contentScope ateapipb.SnapshotContentScope) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizePaused")
 	defer func() { err = done(err) }()
 
@@ -263,7 +264,6 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 				ateattr.ActorRefLogAttrs(actorRef)...)
 			newState = ateapipb.ActorState_ACTOR_STATE_CRASHED
 		}
-		contentScope := actorTemplate.GetSnapshotConfig().GetOnPause()
 		sandboxClass := ""
 		if worker != nil {
 			sandboxClass = worker.GetSandboxClass()

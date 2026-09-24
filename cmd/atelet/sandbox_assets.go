@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ategcs"
+	"github.com/agent-substrate/substrate/internal/atelet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -46,7 +47,7 @@ import (
 // sandboxManifestName is the object/file name of the per-snapshot manifest that
 // records the actor identity, snapshot files, and sandbox binaries. It is written
 // next to the checkpoint images so a snapshot is self-describing.
-const sandboxManifestName = "manifest.json"
+const sandboxManifestName = atelet.SnapshotManifestName
 
 // maxAssetBytes guards disk against an unbounded download URL; a var so tests can lower it.
 // ponytail: 8GiB ceiling, make it a flag if a rootfs ever needs more.

@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/atelet"
 	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -84,6 +86,9 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 		wireSnapshotScope, err = w.ensurePausedSnapshotUploaded(leaseCtx, actorRef, actor, actorTemplate)
 	} else {
 		wireSnapshotScope, err = w.ensureAteletSuspended(leaseCtx, actorRef, actor, actorTemplate)
+		if errors.Is(err, errSnapshotKeptOnNode) {
+			return nil, w.finishKeptOnNode(leaseCtx, actorRef, actor, actorTemplate, err)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -156,9 +161,16 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 	if err != nil {
 		return nil, err
 	}
+	inProgress := uri.String()
+	if recorded := actor.GetStatus().GetInProgressSnapshotUri(); recorded != "" {
+		// A suspend whose upload failed left its location recorded (see
+		// finishKeptOnNode). Uploading to it again overwrites what that attempt
+		// partly wrote, where a new location would leak it.
+		inProgress = recorded
+	}
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDING
-		toUpdate.Status.InProgressSnapshotUri = uri.String()
+		toUpdate.Status.InProgressSnapshotUri = inProgress
 		return nil
 	})
 	if err != nil {
@@ -217,6 +229,13 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	ctx, done := stepSpan(ctx, "CallAteletSuspend")
 	defer func() { err = done(err) }()
 
+	if actor.GetStatus().GetInProgressLocalSnapshotName() != "" {
+		// A previous attempt's upload failed and atelet kept the snapshot on
+		// the node; the workload is gone, so there is nothing to checkpoint.
+		markSkipped(ctx, "snapshot already kept on the node")
+		return ateattr.SnapshotScopeValue(actorSnapshotContentScopeToAtelet(commitSnapshotScope(actorRef.Atespace, actorTemplate))), errSnapshotKeptOnNode
+	}
+
 	assignment := actor.GetStatus().GetWorkerAssignment()
 	if assignment == nil {
 		// Missing active worker pod reference in SUSPENDING state indicates corrupted store state.
@@ -259,6 +278,22 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	wireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)
 
 	if _, err = client.Checkpoint(ctx, req); err != nil {
+		if atelet.IsSnapshotKeptOnNode(err) {
+			if rerr := w.recordSnapshotKeptOnNode(ctx, actorRef, actor); rerr != nil {
+				return wireSnapshotScope, rerr
+			}
+			return wireSnapshotScope, fmt.Errorf("%w: %w", errSnapshotKeptOnNode, err)
+		}
+		// A failure after the manifest landed (tearing down the workload's
+		// directories or volumes, or the reply getting lost) leaves a complete
+		// snapshot: crashing would revert the actor past it.
+		if committed, cerr := w.inProgressSnapshotCommitted(ctx, actor); cerr != nil {
+			slog.WarnContext(ctx, "Failed to check whether the snapshot was committed", slog.Any("actor", actorRef), slog.Any("err", cerr))
+		} else if committed {
+			slog.LogAttrs(ctx, slog.LevelWarn, "Checkpoint failed after its snapshot was committed; finishing the suspend",
+				append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", err))...)
+			return wireSnapshotScope, nil
+		}
 		slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to error",
 			append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", err))...)
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationSuspend); cerr != nil {
@@ -267,6 +302,70 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 		return wireSnapshotScope, fmt.Errorf("actor %s crashed: %w", actorRef, err)
 	}
 	return wireSnapshotScope, nil
+}
+
+// errSnapshotKeptOnNode marks a suspend whose upload failed after atelet kept
+// the snapshot on the worker's node.
+var errSnapshotKeptOnNode = errors.New("the snapshot could not be uploaded and was kept on the node")
+
+// recordSnapshotKeptOnNode records the local snapshot atelet kept, named after
+// the in-progress snapshot URI, so a re-entered workflow finishes pausing the
+// actor on it rather than checkpointing a workload that is gone.
+func (w *ActorWorkflow) recordSnapshotKeptOnNode(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) error {
+	uri, err := resources.ParseSnapshotURI(actor.GetStatus().GetInProgressSnapshotUri())
+	if err != nil {
+		return fmt.Errorf("while naming the snapshot kept on the node: %w", err)
+	}
+	_, err = w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+		toUpdate.Status.InProgressLocalSnapshotName = uri.Name()
+		return nil
+	})
+	if errors.Is(err, store.ErrVersionConflict) {
+		return status.Error(codes.Aborted, "concurrent update conflict, please retry")
+	}
+	return err
+}
+
+// finishKeptOnNode pauses the actor on the node that holds its kept snapshot:
+// the snapshot's volumes are detached and its worker freed, as a pause would.
+// The in-progress snapshot URI stays recorded for the next suspend to upload
+// to. The suspend itself still fails, so its caller retries it.
+func (w *ActorWorkflow) finishKeptOnNode(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate, cause error) error {
+	if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumes", ateattr.OperationSuspend); err != nil {
+		return err
+	}
+	paused, err := w.ensurePausedFinalized(ctx, actorRef, actorTemplate, commitSnapshotScope(actorRef.Atespace, actorTemplate))
+	if err != nil {
+		return err
+	}
+	if paused.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
+		return fmt.Errorf("actor %s is %s: %w", actorRef, paused.GetStatus().GetState(), cause)
+	}
+	return status.Errorf(codes.Unavailable, "actor %s is PAUSED on node %s: %v; suspend it again to retry the upload",
+		actorRef, paused.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(), cause)
+}
+
+// inProgressSnapshotCommitted reports whether the in-progress snapshot's
+// manifest is in object storage. atelet uploads it after every file it lists,
+// so its presence means the snapshot is complete.
+func (w *ActorWorkflow) inProgressSnapshotCommitted(ctx context.Context, actor *ateapipb.Actor) (bool, error) {
+	if w.objectStore == nil {
+		return false, nil
+	}
+	uri, err := resources.ParseSnapshotURI(actor.GetStatus().GetInProgressSnapshotUri())
+	if err != nil {
+		return false, err
+	}
+	bucket, prefix, err := objectstore.BucketPrefix(uri.Prefix())
+	if err != nil {
+		return false, err
+	}
+	manifest := prefix + atelet.SnapshotManifestName
+	objects, err := w.objectStore.List(ctx, bucket, manifest)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(objects, manifest), nil
 }
 
 // ensurePausedSnapshotUploaded suspends a PAUSED actor by telling the atelet
@@ -313,6 +412,24 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 	wireSnapshotScope = ateattr.SnapshotScopeValue(req.DesiredScope)
 
 	if _, err = client.UploadPausedCheckpoint(ctx, req); err != nil {
+		// atelet prunes the local snapshot once the upload commits, so a
+		// committed upload whose reply was lost must finish the suspend: the
+		// uploaded copy is the only one left.
+		if committed, cerr := w.inProgressSnapshotCommitted(ctx, actor); cerr != nil {
+			slog.WarnContext(ctx, "Failed to check whether the snapshot was committed", slog.Any("actor", actorRef), slog.Any("err", cerr))
+		} else if committed {
+			slog.LogAttrs(ctx, slog.LevelWarn, "Upload failed after its snapshot was committed; finishing the suspend",
+				append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", err))...)
+			return wireSnapshotScope, nil
+		}
+		if status.Code(err) != codes.NotFound {
+			// The snapshot is still on the node: keep the actor resumable
+			// from it, and let a later suspend retry the upload.
+			if rerr := w.returnToPaused(ctx, actorRef, actor); rerr != nil {
+				return wireSnapshotScope, rerr
+			}
+			return wireSnapshotScope, status.Errorf(codes.Unavailable, "actor %s stays PAUSED: uploading its snapshot failed: %v", actorRef, err)
+		}
 		slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to error",
 			append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", err))...)
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationSuspend); cerr != nil {
@@ -321,6 +438,24 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 		return wireSnapshotScope, fmt.Errorf("actor %s crashed: %w", actorRef, err)
 	}
 	return wireSnapshotScope, nil
+}
+
+// returnToPaused moves a paused-origin suspend that could not upload back to
+// PAUSED. The in-progress snapshot URI stays recorded so the next suspend
+// uploads to it again.
+func (w *ActorWorkflow) returnToPaused(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) error {
+	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_PAUSED
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrVersionConflict) {
+			return status.Error(codes.Aborted, "concurrent update conflict, please retry")
+		}
+		return err
+	}
+	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
+	return nil
 }
 
 // newInProgressSnapshotURI is where the snapshot an actor is currently taking is

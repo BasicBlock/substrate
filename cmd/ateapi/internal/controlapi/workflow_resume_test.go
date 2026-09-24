@@ -1206,6 +1206,11 @@ type capturingAtelet struct {
 	// dropSnapshotMemoryErr, when set, is returned by DropSnapshotMemory
 	// instead of a success response.
 	dropSnapshotMemoryErr error
+	// checkpointErr and uploadPausedErr, when set, are returned by Checkpoint
+	// and UploadPausedCheckpoint instead of a success response.
+	checkpointErr   error
+	uploadPausedErr error
+	uploadPaused    *ateletpb.UploadPausedCheckpointRequest
 }
 
 func (f *capturingAtelet) DropSnapshotMemory(ctx context.Context, req *ateletpb.DropSnapshotMemoryRequest) (*ateletpb.DropSnapshotMemoryResponse, error) {

@@ -3230,47 +3230,83 @@ func TestSuspendActor_FromPaused(t *testing.T) {
 	}
 }
 
-// TestSuspendActor_FromPaused_UploadFailureCrashes: an atelet error while
-// uploading the paused snapshot crashes the actor like any other atelet
-// error, releasing its worker and making it unsuspendable.
-func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
-	ns := namespaceForTest("ns-suspend-paused-crash")
+// TestSuspendActor_FromPaused_UploadFailureStaysPaused: an atelet error while
+// uploading the paused snapshot leaves the actor PAUSED on it, so nothing is
+// lost and a later suspend retries the upload.
+func TestSuspendActor_FromPaused_UploadFailureStaysPaused(t *testing.T) {
+	ns := namespaceForTest("ns-suspend-paused-retry")
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
-
-	createTemplate(t, tc, ns)
-	podUID := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
-
-	name := "id1"
-	_, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
-	}})
-	if err != nil {
-		t.Fatalf("CreateActor failed: %v", err)
-	}
-	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
-		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
-	}); err != nil {
-		t.Fatalf("ResumeActor failed: %v", err)
-	}
-	if _, err := tc.client.PauseActor(context.Background(), &ateapipb.PauseActorRequest{
-		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
-	}); err != nil {
-		t.Fatalf("PauseActor failed: %v", err)
-	}
+	name, _ := pausedActorForUpload(t, tc, ns)
 
 	tc.fakeAtelet.Reset()
 	tc.fakeAtelet.FailUpload = status.Error(codes.Unavailable, "injected upload failure")
-	_, err = tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{
+	_, err := tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
 	})
 	if err == nil {
 		t.Fatal("SuspendActor succeeded despite failing upload")
 	}
-	// The caller sees atelet's own status, not a synthetic crash status.
 	if got := status.Code(err); got != codes.Unavailable {
 		t.Errorf("status code = %v, want %v (err: %v)", got, codes.Unavailable, err)
+	}
+
+	paused, err := tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	})
+	if err != nil {
+		t.Fatalf("GetActor failed: %v", err)
+	}
+	if paused.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
+		t.Fatalf("state after failed upload = %v, want PAUSED", paused.GetStatus().GetState())
+	}
+	if paused.GetStatus().GetLocalSnapshotInfo().GetSnapshotName() == "" {
+		t.Errorf("expected the local snapshot to stay recorded, got %v", paused.GetStatus().GetLocalSnapshotInfo())
+	}
+	retryURI := paused.GetStatus().GetInProgressSnapshotUri()
+	if retryURI == "" {
+		t.Errorf("expected the in-progress snapshot location to stay recorded for the retry")
+	}
+
+	// A healthy atelet finishes the suspend, on the location the failed
+	// attempt left recorded.
+	tc.fakeAtelet.Lock.Lock()
+	tc.fakeAtelet.FailUpload = nil
+	tc.fakeAtelet.Lock.Unlock()
+	suspended, err := tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	})
+	if err != nil {
+		t.Fatalf("retried SuspendActor failed: %v", err)
+	}
+	if suspended.GetActor().GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+		t.Fatalf("state after retry = %v, want SUSPENDED", suspended.GetActor().GetStatus().GetState())
+	}
+	if got := suspended.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != retryURI {
+		t.Errorf("external snapshot = %q, want the retried location %q", got, retryURI)
+	}
+}
+
+// TestSuspendActor_FromPaused_SnapshotGoneCrashes: atelet reporting the paused
+// snapshot gone (NotFound) crashes the actor, since nothing is left to resume
+// or upload.
+func TestSuspendActor_FromPaused_SnapshotGoneCrashes(t *testing.T) {
+	ns := namespaceForTest("ns-suspend-paused-crash")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+	name, podUID := pausedActorForUpload(t, tc, ns)
+
+	tc.fakeAtelet.Reset()
+	tc.fakeAtelet.FailUpload = status.Error(codes.NotFound, "local snapshot is gone and no uploaded copy exists")
+	_, err := tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	})
+	if err == nil {
+		t.Fatal("SuspendActor succeeded despite a missing snapshot")
+	}
+	// The caller sees atelet's own status, not a synthetic crash status.
+	if got := status.Code(err); got != codes.NotFound {
+		t.Errorf("status code = %v, want %v (err: %v)", got, codes.NotFound, err)
 	}
 
 	crashed, err := tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
@@ -3280,7 +3316,7 @@ func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
 		t.Fatalf("GetActor failed: %v", err)
 	}
 	if crashed.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_CRASHED {
-		t.Fatalf("state after failed upload = %v, want CRASHED", crashed.GetStatus().GetState())
+		t.Fatalf("state after a missing snapshot = %v, want CRASHED", crashed.GetStatus().GetState())
 	}
 	if crashed.GetStatus().GetWorkerAssignment() != nil {
 		t.Errorf("expected worker assignment to be cleared, got %v", crashed.GetStatus().GetWorkerAssignment())
@@ -3304,6 +3340,34 @@ func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "ACTOR_STATE_CRASHED") {
 		t.Errorf("expected FailedPrecondition/ACTOR_STATE_CRASHED error, got %v", err)
 	}
+}
+
+// pausedActorForUpload creates, resumes and pauses an actor on a fresh worker
+// pod, returning the actor's name and the pod's UID.
+func pausedActorForUpload(t *testing.T, tc *testContext, ns string) (string, string) {
+	t.Helper()
+	createTemplate(t, tc, ns)
+	podUID := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	name := "id1"
+	_, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+	}})
+	if err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	}); err != nil {
+		t.Fatalf("ResumeActor failed: %v", err)
+	}
+	if _, err := tc.client.PauseActor(context.Background(), &ateapipb.PauseActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	}); err != nil {
+		t.Fatalf("PauseActor failed: %v", err)
+	}
+	return name, podUID
 }
 
 // TestResumeActor_RelocatesAfterSuspendFromPaused covers the capacity-recovery

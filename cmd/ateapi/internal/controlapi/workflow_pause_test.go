@@ -61,7 +61,7 @@ func TestEnsurePausedFinalized_WorkerGone(t *testing.T) {
 	// Intentionally NOT creating the worker in store, simulates worker already gone.
 
 	w := &ActorWorkflow{store: st}
-	finalized, err := w.ensurePausedFinalized(ctx, actorRef, &ateapipb.ActorTemplate{})
+	finalized, err := w.ensurePausedFinalized(ctx, actorRef, &ateapipb.ActorTemplate{}, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED)
 	if err != nil {
 		t.Fatalf("ensurePausedFinalized: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 			tmpl := &ateapipb.ActorTemplate{
 				SnapshotConfig: &ateapipb.SnapshotConfig{OnPause: tc.onPause},
 			}
-			got, err := w.ensurePausedFinalized(ctx, actorRef, tmpl)
+			got, err := w.ensurePausedFinalized(ctx, actorRef, tmpl, tmpl.GetSnapshotConfig().GetOnPause())
 			if err != nil {
 				t.Fatalf("ensurePausedFinalized: %v", err)
 			}

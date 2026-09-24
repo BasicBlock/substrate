@@ -702,15 +702,25 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	// snapshots on both paths, so timing it as part of an external upload would
 	// mix local disk deletion into the object-storage measurement.
 	tPersist := time.Now()
+	// Set when an upload failed but its snapshot was kept on the node instead.
+	var keptOnNode error
 	switch req.GetType() {
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
-		// TODO(#362): Because we do not cache the external snapshot files when upload fails, we have to mark the Actor as CRASHED.
 		if err := s.uploadExternalCheckpoint(ctx, req, checkpointDir, sandboxRec); err != nil {
 			dPersist = time.Since(tPersist)
-			return nil, fmt.Errorf("while uploading external snapshot: %w", err)
+			// ateom has already stopped the workload, so these files are the only
+			// copy of its state. Keep them as a local snapshot the control plane
+			// can record the actor PAUSED on, for a later suspend to upload,
+			// rather than lose them to a crash.
+			if keepErr := s.keepCheckpointOnNode(ctx, req, checkpointDir, sandboxRec); keepErr != nil {
+				return nil, fmt.Errorf("while uploading external snapshot: %w (and while keeping it on the node: %v)", err, keepErr)
+			}
+			slog.WarnContext(ctx, "Kept a snapshot on the node after its upload failed",
+				slog.Any("actor", actorRef), slog.Any("err", err))
+			keptOnNode = atelet.SnapshotKeptOnNodeError(err)
 		}
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL:
-		if err := s.moveLocalCheckpoint(ctx, req, checkpointDir, sandboxRec); err != nil {
+		if err := s.moveLocalCheckpoint(ctx, req, req.GetLocalConfig().GetSnapshotName(), checkpointDir, sandboxRec); err != nil {
 			dPersist = time.Since(tPersist)
 			return nil, fmt.Errorf("while moving to local snapshot: %w", err)
 		}
@@ -719,16 +729,45 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	}
 	dPersist = time.Since(tPersist)
 
+	var teardownErr error
 	if err := s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes()); err != nil {
-		return nil, fmt.Errorf("while unmounting external volumes: %w", err)
+		teardownErr = fmt.Errorf("while unmounting external volumes: %w", err)
+	} else if err := resetActorDirs(actorUID); err != nil {
+		// Note: we do not crash the actor if resetting the directory fails.
+		teardownErr = fmt.Errorf("while resetting actor dirs: %w", err)
 	}
-
-	// Note: we do not crash the actor if resetting the directory fails.
-	if err := resetActorDirs(actorUID); err != nil {
-		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
+	if keptOnNode != nil {
+		// The kept snapshot is the one thing the control plane must hear
+		// about: a teardown failure reported instead would crash the actor and
+		// strand it.
+		if teardownErr != nil {
+			slog.WarnContext(ctx, "Failed to tear down after keeping a snapshot on the node",
+				slog.Any("actor", actorRef), slog.Any("err", teardownErr))
+		}
+		return nil, keptOnNode
+	}
+	if teardownErr != nil {
+		return nil, teardownErr
 	}
 
 	return &ateletpb.CheckpointResponse{}, nil
+}
+
+// keepCheckpointOnNode moves an external checkpoint that failed to upload into
+// a local snapshot named after its in-progress snapshot URI, the name the
+// control plane records the actor PAUSED under. Golden actors are never
+// paused, so their checkpoints are not kept.
+func (s *AteomHerder) keepCheckpointOnNode(ctx context.Context, req *ateletpb.CheckpointRequest, checkpointDir string, rec *sandboxAssetsRecord) error {
+	if req.GetAtespace() == resources.GoldenActorAtespace {
+		return fmt.Errorf("golden actors cannot be paused")
+	}
+	uri, err := resources.ParseSnapshotURI(req.GetExternalConfig().GetSnapshotUri())
+	if err != nil {
+		return err
+	}
+	// Detached: the upload may have failed because the call's context ended,
+	// and the rename below is what saves the snapshot.
+	return s.moveLocalCheckpoint(context.WithoutCancel(ctx), req, uri.Name(), checkpointDir, rec)
 }
 
 func toAteomSnapshotScope(scope ateletpb.SnapshotScope) ateompb.SnapshotScope {
@@ -745,8 +784,8 @@ func toAteomSnapshotScope(scope ateletpb.SnapshotScope) ateompb.SnapshotScope {
 	}
 }
 
-func (s *AteomHerder) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, checkpointDir string, rec *sandboxAssetsRecord) error {
-	localCheckpointPath := ateompath.LocalSnapshotDir(req.GetActorUid(), req.GetLocalConfig().GetSnapshotName())
+func (s *AteomHerder) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, snapshotName string, checkpointDir string, rec *sandboxAssetsRecord) error {
+	localCheckpointPath := ateompath.LocalSnapshotDir(req.GetActorUid(), snapshotName)
 	if err := os.MkdirAll(localCheckpointPath, 0o700); err != nil {
 		return fmt.Errorf("while creating local checkpoint directory: %w", err)
 	}
@@ -913,7 +952,9 @@ func (s *AteomHerder) uploadLocalCheckpointDir(ctx context.Context, req *ateletp
 			return "", nil
 		}
 		if errors.Is(fetchErr, ategcs.ErrObjectNotFound) {
-			return "", fmt.Errorf("local snapshot %q is gone and no uploaded copy exists: %w",
+			// NotFound is the one failure the control plane crashes the actor
+			// for: every other one leaves the snapshot for a retry.
+			return "", status.Errorf(codes.NotFound, "local snapshot %q is gone and no uploaded copy exists: %v",
 				req.GetLocalSnapshotName(), fetchErr)
 		}
 		return "", fmt.Errorf("while probing for an already-uploaded snapshot manifest: %w", fetchErr)
