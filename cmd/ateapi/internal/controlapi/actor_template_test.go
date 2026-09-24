@@ -177,9 +177,48 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 		})},
 		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_FULL", "")},
 	}, {
-		// Leaving on_commit unset over a DATA on_pause is both a required
-		// violation (on_commit has no default of its own) and a subset
-		// violation (UNSPECIFIED is not DATA).
+		"on_commit FILESYSTEM broader than on_pause DATA",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+		})},
+		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_FILESYSTEM", "")},
+	}, {
+		"on_commit FULL contained in on_pause FILESYSTEM is still broader",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
+		})},
+		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_FULL", "")},
+	}, {
+		"valid filesystem-scoped snapshots contained in full",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
+			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+		})},
+		nil,
+	}, {
+		"valid data on_commit contained in filesystem on_pause",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+		})},
+		nil,
+	}, {
+		"FILESYSTEM scope rejected for micro-VM sandbox_config",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SandboxConfig = &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM, ConfigName: "microvm-default"}
+			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+		})},
+		field.ErrorList{
+			field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_pause"), "SNAPSHOT_CONTENT_SCOPE_FILESYSTEM", ""),
+			field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_FILESYSTEM", ""),
+		},
+	}, {
+		// Leaving on_commit unset over a DATA on_pause is a required
+		// violation (on_commit has no default of its own). UNSPECIFIED ranks
+		// lowest, so it is not also a containment violation.
 		"on_commit unset with data on_pause",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
@@ -187,7 +226,6 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 		})},
 		field.ErrorList{
 			field.Required(field.NewPath("actor_template", "snapshots_config", "on_commit"), ""),
-			field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED", ""),
 		},
 	}, {
 		"missing sandbox_config",

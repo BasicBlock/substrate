@@ -325,9 +325,10 @@ const (
 )
 
 // Values for SnapshotScopeKey, mirroring ateletpb.SnapshotScope. Checkpoints
-// only ever capture Full or Data; DataOnGolden is restore-only.
+// only ever capture Full, Filesystem, or Data; DataOnGolden is restore-only.
 const (
 	SnapshotScopeFull         = "full"
+	SnapshotScopeFilesystem   = "filesystem"
 	SnapshotScopeData         = "data"
 	SnapshotScopeDataOnGolden = "data_on_golden"
 	SnapshotScopeUnknown      = "unknown"
@@ -341,6 +342,8 @@ func SnapshotScopeValue(scope ateletpb.SnapshotScope) string {
 	switch scope {
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		return SnapshotScopeFull
+	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+		return SnapshotScopeFilesystem
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		return SnapshotScopeData
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN:

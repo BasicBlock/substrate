@@ -258,9 +258,15 @@ enum SnapshotScope {
   // Restore-only: restore the ActorTemplate's golden snapshot's guest state
   // (memory + full filesystem delta) combined with the snapshot's durable
   // data. Never valid for CheckpointWorkload — snapshots only ever capture
-  // FULL or DATA; the control plane selects this scope at restore per the
-  // template's onResume configuration.
+  // FULL, FILESYSTEM, or DATA; the control plane selects this scope at
+  // restore per the template's onResume configuration.
   SNAPSHOT_SCOPE_DATA_ON_GOLDEN = 3;
+  // Capture the full filesystem delta on top of the OCI image (including any
+  // attached DurableDir volumes), without process memory. RestoreWorkload
+  // handles this scope as a cold boot: create the containers with a
+  // filesystem checkpoint to restore and start them normally, rather than
+  // `runsc restore`. gVisor only.
+  SNAPSHOT_SCOPE_FILESYSTEM = 4;
 }
 
 message CheckpointWorkloadRequest {

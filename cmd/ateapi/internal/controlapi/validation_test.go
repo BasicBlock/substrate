@@ -1143,7 +1143,7 @@ func validExternalSnapshot(mutate ...func(*ateapipb.ExternalSnapshot)) *ateapipb
 func badExternalSnapshot(mutate ...func(*ateapipb.ExternalSnapshot)) *ateapipb.ExternalSnapshot {
 	breakIt := func(s *ateapipb.ExternalSnapshot) {
 		s.SnapshotUri = ""
-		s.ContentScope = ateapipb.SnapshotContentScope(3)
+		s.ContentScope = ateapipb.SnapshotContentScope(4)
 	}
 	return validExternalSnapshot(append([]func(*ateapipb.ExternalSnapshot){breakIt}, mutate...)...)
 }
@@ -1169,6 +1169,12 @@ func TestValidateExternalSnapshot(t *testing.T) {
 			}),
 		},
 		{
+			name: "valid content_scope: filesystem",
+			obj: valid(func(s *ateapipb.ExternalSnapshot) {
+				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
+			}),
+		},
+		{
 			// UNSPECIFIED reads as FULL, so optional lets the zero value skip
 			// the bounds rather than failing the minimum.
 			name: "valid content_scope: unspecified",
@@ -1183,7 +1189,7 @@ func TestValidateExternalSnapshot(t *testing.T) {
 		},
 		{
 			name: "content_scope above the enum",
-			obj:  valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
+			obj:  valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(4) }),
 			want: field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("maximum")},
 		},
 		{
@@ -1242,7 +1248,7 @@ func TestValidateExternalSnapshotUpdate(t *testing.T) {
 		{
 			name:   "content_scope changed to a value outside the enum",
 			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
+			newObj: valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(4) }),
 			want:   field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("maximum")},
 		},
 		{

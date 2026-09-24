@@ -483,7 +483,7 @@ func TestValidateActorUpdate(t *testing.T) {
 		"invalid actor.status.local_snapshot_info.content_scope",
 		validInput(),
 		validOutput(withStatus(func(s *ateapipb.ActorStatus) {
-			s.LocalSnapshotInfo = &ateapipb.LocalSnapshotInfo{ContentScope: ateapipb.SnapshotContentScope(3)}
+			s.LocalSnapshotInfo = &ateapipb.LocalSnapshotInfo{ContentScope: ateapipb.SnapshotContentScope(4)}
 		})),
 		field.ErrorList{field.Invalid(field.NewPath("status", "local_snapshot_info", "content_scope"), nil, "").WithOrigin("maximum")},
 	}, {
