@@ -49,6 +49,9 @@ func TestValidate(t *testing.T) {
 				Connectors:       []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"},
 			},
 			Atespaces: map[string]AtespaceBindings{"bb-dev": {Viewers: []string{"group:authenticated", "group:google"}}},
+			AtespacePatterns: map[string]AtespaceBindings{
+				"dev-*": {Editors: []string{"kubernetes:system:serviceaccount:internal-eve:devbox-reaper"}},
+			},
 		}
 	}
 	if err := valid().Validate(testProviders, testRuleGroups); err != nil {
@@ -67,6 +70,11 @@ func TestValidate(t *testing.T) {
 		{"empty ID", func(c *Config) { c.Global.Viewers = []string{"google:"} }},
 		{"invalid atespace", func(c *Config) { c.Atespaces["Bad_Name"] = AtespaceBindings{} }},
 		{"bad atespace binding", func(c *Config) { c.Atespaces["eve-demo"] = AtespaceBindings{Editors: []string{"nope"}} }},
+		{"pattern without a star", func(c *Config) { c.AtespacePatterns["dev-"] = AtespaceBindings{} }},
+		{"pattern that is only a star", func(c *Config) { c.AtespacePatterns["*"] = AtespaceBindings{} }},
+		{"star inside a pattern", func(c *Config) { c.AtespacePatterns["d*v-*"] = AtespaceBindings{} }},
+		{"pattern no atespace name starts with", func(c *Config) { c.AtespacePatterns["Dev_*"] = AtespaceBindings{} }},
+		{"bad pattern binding", func(c *Config) { c.AtespacePatterns["ci-*"] = AtespaceBindings{Viewers: []string{"nope"}} }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,6 +96,10 @@ func TestConfigTuples(t *testing.T) {
 			Connectors:       []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"},
 		},
 		Atespaces: map[string]AtespaceBindings{"eve-demo": {Editors: []string{"kubernetes:system:serviceaccount:internal-eve-demo:eve-demo"}}},
+		AtespacePatterns: map[string]AtespaceBindings{
+			"dev-*": {Editors: []string{"kubernetes:system:serviceaccount:internal-eve:devbox-reaper"}},
+			"ci-*":  {Viewers: []string{"group:google/basicblock"}},
+		},
 	}
 	got := cfg.tuples()
 	want := []tuple{
@@ -95,6 +107,9 @@ func TestConfigTuples(t *testing.T) {
 		{User: "group:google/basicblock#member", Relation: "atespace_creator", Object: "global:root"},
 		{User: "user:kubernetes/system%3Aserviceaccount%3Ainternal-preview%3Apreview-proxy", Relation: "connector", Object: "global:root"},
 		{User: "user:kubernetes/system%3Aserviceaccount%3Ainternal-eve-demo%3Aeve-demo", Relation: "editor", Object: "atespace:eve-demo"},
+		// Patterns in name order, each an atespace_pattern object named by its prefix.
+		{User: "group:google/basicblock#member", Relation: "viewer", Object: "atespace_pattern:ci-"},
+		{User: "user:kubernetes/system%3Aserviceaccount%3Ainternal-eve%3Adevbox-reaper", Relation: "editor", Object: "atespace_pattern:dev-"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("tuples() = %+v\nwant %+v", got, want)
@@ -107,6 +122,7 @@ func TestConfigTuples(t *testing.T) {
 	for _, tt := range []tuple{
 		{User: "user:x", Relation: "creator", Object: "atespace:a"},
 		{User: "atespace:a", Relation: "parent_atespace", Object: "actor:a/b"},
+		{User: "atespace_pattern:dev-", Relation: "parent_pattern", Object: "atespace:dev-a"},
 	} {
 		if managed(tt) {
 			t.Errorf("managed(%+v) = true", tt)

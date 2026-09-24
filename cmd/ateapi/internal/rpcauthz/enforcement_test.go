@@ -45,6 +45,7 @@ var (
 	egress       = component("atenet-egress")
 	atelet       = component("atelet")
 	previewProxy = kubernetesSA("internal-preview", "preview-proxy")
+	reaper       = kubernetesSA("internal-eve", "devbox-reaper")
 )
 
 func googleUser(email string) principal.PrincipalInfo {
@@ -190,6 +191,23 @@ func TestEnforcementExample(t *testing.T) {
 			{previewProxy, ateapipb.Control_CheckActorAccess_FullMethodName, &ateapipb.CheckActorAccessRequest{Actor: ref("dev-alice", "w"), Token: "t"}, deny},
 			{previewProxy, ateapipb.Control_ListAtespaces_FullMethodName, &ateapipb.ListAtespacesRequest{}, deny},
 			{previewProxy, ateapipb.Control_ListWorkers_FullMethodName, &ateapipb.ListWorkersRequest{}, deny},
+		})
+	})
+
+	t.Run("dev-* pattern editor", func(t *testing.T) {
+		// Edits actors in every developer's atespace, but neither deletes the
+		// atespaces nor lists across them, and has nothing elsewhere.
+		run(t, a, []call{
+			{reaper, ateapipb.Control_ListActors_FullMethodName, &ateapipb.ListActorsRequest{Atespace: "dev-alice"}, allow},
+			{reaper, ateapipb.Control_GetActor_FullMethodName, &ateapipb.GetActorRequest{Actor: ref("dev-bob", "w")}, allow},
+			{reaper, ateapipb.Control_DeleteActor_FullMethodName, &ateapipb.DeleteActorRequest{Actor: ref("dev-alice", "w"), AnyState: true}, allow},
+			{reaper, ateapipb.Control_DeleteActor_FullMethodName, &ateapipb.DeleteActorRequest{Actor: ref("dev-someone-new", "w"), AnyState: true}, allow},
+			{reaper, ateapipb.Control_DeleteAtespace_FullMethodName, &ateapipb.DeleteAtespaceRequest{Atespace: ref("", "dev-alice")}, deny},
+			{reaper, ateapipb.Control_DeleteActor_FullMethodName, &ateapipb.DeleteActorRequest{Actor: ref("eve-demo", "a")}, deny},
+			{reaper, ateapipb.Control_ListActors_FullMethodName, &ateapipb.ListActorsRequest{Atespace: "bb-dev"}, deny},
+			{reaper, ateapipb.Control_ListActors_FullMethodName, &ateapipb.ListActorsRequest{}, deny},
+			{reaper, ateapipb.Control_ListAtespaces_FullMethodName, &ateapipb.ListAtespacesRequest{}, deny},
+			{reaper, ateapipb.Control_ListWorkers_FullMethodName, &ateapipb.ListWorkersRequest{}, deny},
 		})
 	})
 

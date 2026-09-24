@@ -48,6 +48,9 @@ type Config struct {
 	Global GlobalBindings `json:"global,omitempty"`
 	// Atespaces binds roles in named atespaces, which need not exist yet.
 	Atespaces map[string]AtespaceBindings `json:"atespaces,omitempty"`
+	// AtespacePatterns binds roles in every atespace whose name matches a
+	// pattern, "<prefix>*", including atespaces created after the binding.
+	AtespacePatterns map[string]AtespaceBindings `json:"atespacePatterns,omitempty"`
 }
 
 // GlobalBindings are the global:root roles.
@@ -141,7 +144,44 @@ func (c *Config) Validate(providers, ruleGroups []string) error {
 			}
 		}
 	}
+	for pattern, b := range c.AtespacePatterns {
+		if _, err := patternPrefix(pattern); err != nil {
+			return fmt.Errorf("atespacePatterns: %w", err)
+		}
+		for role, refs := range map[string][]string{"owners": b.Owners, "editors": b.Editors, "viewers": b.Viewers} {
+			if err := check(fmt.Sprintf("atespacePatterns.%s.%s", pattern, role), refs); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// patternPrefix returns the prefix of an atespace pattern, "<prefix>*": a
+// nonempty start of an atespace name followed by one "*", which matches the
+// rest of the name.
+func patternPrefix(pattern string) (string, error) {
+	prefix, ok := strings.CutSuffix(pattern, "*")
+	if !ok || prefix == "" || strings.Contains(prefix, "*") {
+		return "", fmt.Errorf("%q must be an atespace name prefix followed by one *", pattern)
+	}
+	// Some atespace name must start with it.
+	if !resources.IsValidResourceName(prefix + "a") {
+		return "", fmt.Errorf("no atespace name starts with %q", prefix)
+	}
+	return prefix, nil
+}
+
+// patternPrefixes returns the prefixes of the config's atespace patterns, in
+// order. The config must already be validated.
+func (c *Config) patternPrefixes() []string {
+	var out []string
+	for pattern := range c.AtespacePatterns {
+		prefix, _ := patternPrefix(pattern)
+		out = append(out, prefix)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // tuples returns the role binding tuples the config asks for.
@@ -162,6 +202,13 @@ func (c *Config) tuples() []tuple {
 		add(object, "editor", b.Editors)
 		add(object, "viewer", b.Viewers)
 	}
+	for _, prefix := range c.patternPrefixes() {
+		b := c.AtespacePatterns[prefix+"*"]
+		object := atespacePatternObject(prefix)
+		add(object, "owner", b.Owners)
+		add(object, "editor", b.Editors)
+		add(object, "viewer", b.Viewers)
+	}
 	return out
 }
 
@@ -171,7 +218,7 @@ func managed(t tuple) bool {
 	if t.Object == GlobalObject {
 		return t.Relation == "owner" || t.Relation == "viewer" || t.Relation == "atespace_creator" || t.Relation == "connector"
 	}
-	if strings.HasPrefix(t.Object, "atespace:") {
+	if strings.HasPrefix(t.Object, "atespace:") || strings.HasPrefix(t.Object, "atespace_pattern:") {
 		return t.Relation == "owner" || t.Relation == "editor" || t.Relation == "viewer"
 	}
 	return false
