@@ -49,6 +49,11 @@ type global
     define can_create_atespace: owner or atespace_creator
     define can_get: viewer
 
+    # Reaches can_connect on every actor in every atespace (see actor.can_connect
+    # below) and nothing else: no get/list/create/update/suspend/resume/delete,
+    # no templates, tags, egress policies, workers or credential minting.
+    define connector: [user, group#member]
+
     # --- Policy Governance (SetPolicy / GetPolicy) ---
     define can_set_policy: owner
     define can_get_policy: viewer
@@ -67,6 +72,10 @@ type atespace
     define owner: [user, group#member] or creator or owner from parent_global
     define editor: [user, group#member] or owner
     define viewer: [user, group#member] or editor or viewer from parent_global
+
+    # Global connectors reach every atespace's actors (see actor.can_connect);
+    # this carries no other permission.
+    define connector: connector from parent_global
 
     # --- 2. Policy Governance (SetPolicy / GetPolicy) ---
     define can_set_policy: owner
@@ -108,8 +117,9 @@ type actor
 
     # Data Plane Ingress: Routers (or editors) can resume
     define can_resume: [user] or editor from parent_atespace
-    # Reach the actor's ports through the ingress gateway (CheckActorAccess)
-    define can_connect: [user] or editor from parent_atespace
+    # Reach the actor's ports through the ingress gateway (CheckActorAccess).
+    # Global connectors reach every actor this way and nothing else.
+    define can_connect: [user] or editor from parent_atespace or connector from parent_atespace
 
     # Lifecycle Operations
     define can_suspend: [user] or editor from parent_atespace

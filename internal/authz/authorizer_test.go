@@ -128,3 +128,61 @@ func TestReconcileKeepsCreatorsAndDropsRemovedBindings(t *testing.T) {
 		t.Error("a forgotten creator kept access")
 	}
 }
+
+// TestConnectorsConnectEverywhereAndNothingElse verifies the global connectors
+// list grants can_connect on actors in any atespace, including one never
+// mentioned in configuration, and nothing else: no other actor relation, no
+// atespace role, and no global role.
+func TestConnectorsConnectEverywhereAndNothingElse(t *testing.T) {
+	ctx := context.Background()
+	pool := authztest.StartPostgres(t)
+	proxy := user("kubernetes", "system:serviceaccount:internal-preview:preview-proxy")
+
+	cfg := &authz.Config{
+		Mode:   authz.ModeEnforce,
+		Global: authz.GlobalBindings{Connectors: []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"}},
+	}
+	a, err := authz.NewAuthorizer(ctx, newServer(t, pool), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// can_connect on actors in atespaces the connector was never bound to,
+	// created on demand.
+	for _, atespace := range []string{"dev-alice", "dev-someone-new"} {
+		if !allowed(t, a, proxy, authz.ActorObject(atespace, "box"), "can_connect") {
+			t.Errorf("connector cannot can_connect on an actor in unbound atespace %q", atespace)
+		}
+	}
+
+	// Nothing else on the actor.
+	for _, relation := range []string{"can_get", "can_update", "can_delete", "can_resume", "can_suspend", "can_revert"} {
+		if allowed(t, a, proxy, authz.ActorObject("dev-alice", "box"), relation) {
+			t.Errorf("connector has unexpected actor relation %q", relation)
+		}
+	}
+
+	// Nothing on the atespace.
+	for _, relation := range []string{"owner", "editor", "viewer", "can_get", "can_update", "can_delete", "can_create_actor", "can_create_actor_template"} {
+		if allowed(t, a, proxy, authz.AtespaceObject("dev-alice"), relation) {
+			t.Errorf("connector has unexpected atespace relation %q", relation)
+		}
+	}
+
+	// Nothing on the global scope beyond the connector relation itself.
+	for _, relation := range []string{"owner", "viewer", "atespace_creator", "can_create_atespace", "can_get", "can_set_policy", "can_get_policy"} {
+		if allowed(t, a, proxy, authz.Global(), relation) {
+			t.Errorf("connector has unexpected global relation %q", relation)
+		}
+	}
+
+	// Reconciling a config without the connector removes it.
+	empty := &authz.Config{Mode: authz.ModeEnforce}
+	b, err := authz.NewAuthorizer(ctx, newServer(t, pool), empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed(t, b, proxy, authz.ActorObject("dev-alice", "box"), "can_connect") {
+		t.Error("a removed connector binding kept access")
+	}
+}
