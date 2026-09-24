@@ -46,6 +46,7 @@ func TestValidate(t *testing.T) {
 			Global: GlobalBindings{
 				Owners:           []string{"mtls:spiffe://cluster.local/ns/ate-system/sa/atelet", "kubernetes:system:serviceaccount:ate-system:ate-client"},
 				AtespaceCreators: []string{"group:google/basicblock"},
+				Connectors:       []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"},
 			},
 			Atespaces: map[string]AtespaceBindings{"bb-dev": {Viewers: []string{"group:authenticated", "group:google"}}},
 		}
@@ -61,6 +62,7 @@ func TestValidate(t *testing.T) {
 		{"unknown mode", func(c *Config) { c.Mode = "permissive" }},
 		{"unknown provider", func(c *Config) { c.Global.Owners = []string{"github:someone"} }},
 		{"unknown group", func(c *Config) { c.Global.AtespaceCreators = []string{"group:google/everyone"} }},
+		{"unknown connector provider", func(c *Config) { c.Global.Connectors = []string{"github:someone"} }},
 		{"missing provider", func(c *Config) { c.Global.Viewers = []string{"paul@basicblock.io"} }},
 		{"empty ID", func(c *Config) { c.Global.Viewers = []string{"google:"} }},
 		{"invalid atespace", func(c *Config) { c.Atespaces["Bad_Name"] = AtespaceBindings{} }},
@@ -83,6 +85,7 @@ func TestConfigTuples(t *testing.T) {
 		Global: GlobalBindings{
 			Owners:           []string{"kubernetes:system:serviceaccount:ate-system:ate-client"},
 			AtespaceCreators: []string{"group:google/basicblock"},
+			Connectors:       []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"},
 		},
 		Atespaces: map[string]AtespaceBindings{"eve-demo": {Editors: []string{"kubernetes:system:serviceaccount:internal-eve-demo:eve-demo"}}},
 	}
@@ -90,6 +93,7 @@ func TestConfigTuples(t *testing.T) {
 	want := []tuple{
 		{User: "user:kubernetes/system%3Aserviceaccount%3Aate-system%3Aate-client", Relation: "owner", Object: "global:root"},
 		{User: "group:google/basicblock#member", Relation: "atespace_creator", Object: "global:root"},
+		{User: "user:kubernetes/system%3Aserviceaccount%3Ainternal-preview%3Apreview-proxy", Relation: "connector", Object: "global:root"},
 		{User: "user:kubernetes/system%3Aserviceaccount%3Ainternal-eve-demo%3Aeve-demo", Relation: "editor", Object: "atespace:eve-demo"},
 	}
 	if !slices.Equal(got, want) {

@@ -32,6 +32,10 @@ global:
   - group:google/basicblock
   # An agent runtime's Google service account.
   - google:eve-runtime@basicblock-internal.iam.gserviceaccount.com
+  connectors:
+  # The in-cluster preview proxy reaches every developer's workspace actors,
+  # created on demand, and nothing else.
+  - kubernetes:system:serviceaccount:internal-preview:preview-proxy
 atespaces:
   # Developers create workspaces from these templates in their own atespaces.
   bb-dev:

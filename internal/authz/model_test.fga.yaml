@@ -90,6 +90,18 @@ tuples:
     relation: can_revert
     object: actor:runner-1
 
+  # Global connector (a preview proxy) and an atespace it was never bound to,
+  # created on demand with no other role bindings at all.
+  - user: user:conrad
+    relation: connector
+    object: global:root
+  - user: global:root
+    relation: parent_global
+    object: atespace:preview-alice
+  - user: atespace:preview-alice
+    relation: parent_atespace
+    object: actor:preview-alice/box
+
 tests:
   - name: 1. Global Superadmin & Viewer Propagation
     check:
@@ -314,3 +326,62 @@ tests:
         assertions:
           can_get: true
           can_create_actor: false
+
+  - name: 7. Global Connector (can_connect only, everywhere)
+    check:
+      - user: user:conrad
+        object: global:root
+        assertions:
+          connector: true
+          owner: false
+          viewer: false
+          atespace_creator: false
+          can_create_atespace: false
+          can_get: false
+          can_set_policy: false
+          can_get_policy: false
+      # An atespace it was already bound to nothing else in.
+      - user: user:conrad
+        object: atespace:space-1
+        assertions:
+          connector: true
+          owner: false
+          editor: false
+          viewer: false
+          can_get: false
+          can_update: false
+          can_delete: false
+          can_create_actor: false
+          can_create_actor_template: false
+      - user: user:conrad
+        object: actor:runner-1
+        assertions:
+          can_connect: true
+          can_get: false
+          can_update: false
+          can_delete: false
+          can_resume: false
+          can_suspend: false
+          can_revert: false
+      # An atespace created on demand with no other bindings at all: still reachable.
+      - user: user:conrad
+        object: atespace:preview-alice
+        assertions:
+          connector: true
+          viewer: false
+          can_get: false
+      - user: user:conrad
+        object: actor:preview-alice/box
+        assertions:
+          can_connect: true
+          can_get: false
+          can_update: false
+          can_delete: false
+          can_resume: false
+          can_suspend: false
+          can_revert: false
+      # An unbound principal still cannot connect anywhere.
+      - user: user:eve
+        object: actor:preview-alice/box
+        assertions:
+          can_connect: false

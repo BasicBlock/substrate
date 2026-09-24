@@ -40,10 +40,11 @@ var (
 		ID: "eve-runtime@basicblock-internal.iam.gserviceaccount.com", Kind: principal.KindJWT, Provider: "google",
 		Groups: []string{principal.GroupAuthenticated, "google", "google/service-accounts"},
 	}
-	controller = component("ate-controller")
-	router     = component("atenet-router")
-	egress     = component("atenet-egress")
-	atelet     = component("atelet")
+	controller   = component("ate-controller")
+	router       = component("atenet-router")
+	egress       = component("atenet-egress")
+	atelet       = component("atelet")
+	previewProxy = kubernetesSA("internal-preview", "preview-proxy")
 )
 
 func googleUser(email string) principal.PrincipalInfo {
@@ -170,6 +171,25 @@ func TestEnforcementExample(t *testing.T) {
 			{egress, ateapipb.Control_MintActorJWT_FullMethodName, &ateapipb.MintActorJWTRequest{Actor: ref("eve-demo", "x")}, allow},
 			{egress, ateapipb.Control_GetActorEgressPolicy_FullMethodName, &ateapipb.GetActorEgressPolicyRequest{Actor: ref("dev-alice", "x")}, allow},
 			{atelet, ateapipb.WorkerService_SetWorkerCapacity_FullMethodName, &ateapipb.SetWorkerCapacityRequest{}, allow},
+		})
+	})
+
+	t.Run("preview proxy connector", func(t *testing.T) {
+		// The global connector reaches actors through CheckActorAccess (asked by
+		// the router, an authorization_test.go concern: authz.Allowed grants it
+		// can_connect directly) but nothing else at the RPC layer, including
+		// calling CheckActorAccess itself, in any atespace.
+		run(t, a, []call{
+			{previewProxy, ateapipb.Control_GetActor_FullMethodName, &ateapipb.GetActorRequest{Actor: ref("dev-alice", "w")}, deny},
+			{previewProxy, ateapipb.Control_ListActors_FullMethodName, &ateapipb.ListActorsRequest{Atespace: "dev-alice"}, deny},
+			{previewProxy, ateapipb.Control_ListActors_FullMethodName, &ateapipb.ListActorsRequest{}, deny},
+			{previewProxy, ateapipb.Control_ResumeActor_FullMethodName, &ateapipb.ResumeActorRequest{Actor: ref("dev-alice", "w")}, deny},
+			{previewProxy, ateapipb.Control_SuspendActor_FullMethodName, &ateapipb.SuspendActorRequest{Actor: ref("dev-alice", "w")}, deny},
+			{previewProxy, ateapipb.Control_DeleteActor_FullMethodName, &ateapipb.DeleteActorRequest{Actor: ref("dev-alice", "w")}, deny},
+			{previewProxy, ateapipb.Control_CreateActor_FullMethodName, newActor("dev-alice", "w", ref("bb-dev", "t"), nil), deny},
+			{previewProxy, ateapipb.Control_CheckActorAccess_FullMethodName, &ateapipb.CheckActorAccessRequest{Actor: ref("dev-alice", "w"), Token: "t"}, deny},
+			{previewProxy, ateapipb.Control_ListAtespaces_FullMethodName, &ateapipb.ListAtespacesRequest{}, deny},
+			{previewProxy, ateapipb.Control_ListWorkers_FullMethodName, &ateapipb.ListWorkersRequest{}, deny},
 		})
 	})
 
