@@ -1162,6 +1162,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, []string{"--fs-restore-image-path", fsRestorePath}); err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 		if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
 			return nil, fmt.Errorf("while starting pause container: %w", err)
 		}
