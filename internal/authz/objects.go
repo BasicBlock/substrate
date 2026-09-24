@@ -39,6 +39,8 @@ type tuple struct {
 type Object struct {
 	ID         string
 	structural []tuple
+	// atespace is the atespace the object is or is in; empty for the global scope.
+	atespace string
 }
 
 // Global returns the global scope.
@@ -47,8 +49,12 @@ func Global() Object { return Object{ID: GlobalObject} }
 // AtespaceObject returns an atespace.
 func AtespaceObject(name string) Object {
 	id := "atespace:" + name
-	return Object{ID: id, structural: []tuple{{User: GlobalObject, Relation: "parent_global", Object: id}}}
+	return Object{ID: id, structural: []tuple{{User: GlobalObject, Relation: "parent_global", Object: id}}, atespace: name}
 }
+
+// atespacePatternObject returns the object an atespace pattern's bindings are
+// stored on, named by the pattern's prefix.
+func atespacePatternObject(prefix string) string { return "atespace_pattern:" + prefix }
 
 // ActorObject returns an actor in its atespace.
 func ActorObject(atespace, name string) Object {
@@ -63,7 +69,11 @@ func ActorTemplateObject(atespace, name string) Object {
 func child(kind, atespace, name string) Object {
 	parent := AtespaceObject(atespace)
 	id := kind + ":" + atespace + "/" + name
-	return Object{ID: id, structural: append([]tuple{{User: parent.ID, Relation: "parent_atespace", Object: id}}, parent.structural...)}
+	return Object{
+		ID:         id,
+		structural: append([]tuple{{User: parent.ID, Relation: "parent_atespace", Object: id}}, parent.structural...),
+		atespace:   atespace,
+	}
 }
 
 // Check is one relation a caller must have on an object.

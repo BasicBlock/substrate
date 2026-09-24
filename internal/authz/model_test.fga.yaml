@@ -102,6 +102,31 @@ tuples:
     relation: parent_atespace
     object: actor:preview-alice/box
 
+  # Pattern bindings: an editor and a viewer of atespace_pattern:dev- (dev-*),
+  # an atespace it matches (ate-api supplies parent_pattern by name) and one it
+  # does not.
+  - user: user:reaper
+    relation: editor
+    object: atespace_pattern:dev-
+  - user: user:rita
+    relation: viewer
+    object: atespace_pattern:dev-
+  - user: global:root
+    relation: parent_global
+    object: atespace:dev-alice
+  - user: atespace_pattern:dev-
+    relation: parent_pattern
+    object: atespace:dev-alice
+  - user: atespace:dev-alice
+    relation: parent_atespace
+    object: actor:dev-alice/box
+  - user: global:root
+    relation: parent_global
+    object: atespace:eve
+  - user: atespace:eve
+    relation: parent_atespace
+    object: actor:eve/box
+
 tests:
   - name: 1. Global Superadmin & Viewer Propagation
     check:
@@ -385,3 +410,39 @@ tests:
         object: actor:preview-alice/box
         assertions:
           can_connect: false
+
+  - name: Pattern bindings reach matching atespaces only
+    check:
+      # A pattern editor edits actors in a matching atespace.
+      - user: user:reaper
+        object: actor:dev-alice/box
+        assertions:
+          can_get: true
+          can_delete: true
+          can_suspend: true
+      # It is an editor of the atespace, not its owner.
+      - user: user:reaper
+        object: atespace:dev-alice
+        assertions:
+          viewer: true
+          editor: true
+          owner: false
+          can_delete: false
+      # Nothing in an atespace the pattern does not match.
+      - user: user:reaper
+        object: actor:eve/box
+        assertions:
+          can_get: false
+          can_delete: false
+      # Nothing globally.
+      - user: user:reaper
+        object: global:root
+        assertions:
+          viewer: false
+          can_get: false
+      # A pattern viewer reads and changes nothing.
+      - user: user:rita
+        object: actor:dev-alice/box
+        assertions:
+          can_get: true
+          can_delete: false

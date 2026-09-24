@@ -186,3 +186,80 @@ func TestConnectorsConnectEverywhereAndNothingElse(t *testing.T) {
 		t.Error("a removed connector binding kept access")
 	}
 }
+
+// TestAtespacePatternsBindEveryMatchingAtespace verifies a pattern binding
+// grants its role in every atespace whose name starts with the pattern's
+// prefix, including ones never mentioned in configuration, and nowhere else:
+// not in other atespaces, not beyond the role, and not globally.
+func TestAtespacePatternsBindEveryMatchingAtespace(t *testing.T) {
+	ctx := context.Background()
+	pool := authztest.StartPostgres(t)
+	reaper := user("kubernetes", "system:serviceaccount:internal-eve:devbox-reaper")
+	reader := user("google", "rita@basicblock.io")
+
+	cfg := &authz.Config{
+		Mode: authz.ModeEnforce,
+		AtespacePatterns: map[string]authz.AtespaceBindings{
+			"dev-*": {
+				Editors: []string{"kubernetes:system:serviceaccount:internal-eve:devbox-reaper"},
+				Viewers: []string{"google:rita@basicblock.io"},
+			},
+		},
+	}
+	a, err := authz.NewAuthorizer(ctx, newServer(t, pool), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Editor on actors in every matching atespace, created on demand.
+	for _, atespace := range []string{"dev-alice", "dev-someone-new"} {
+		for _, relation := range []string{"can_get", "can_update", "can_delete", "can_suspend", "can_resume", "can_revert"} {
+			if !allowed(t, a, reaper, authz.ActorObject(atespace, "box"), relation) {
+				t.Errorf("pattern editor lacks %q on an actor in %q", relation, atespace)
+			}
+		}
+		if !allowed(t, a, reaper, authz.AtespaceObject(atespace), "can_get") {
+			t.Errorf("pattern editor cannot get atespace %q", atespace)
+		}
+	}
+
+	// An editor, not an owner: it cannot delete the atespace itself.
+	if allowed(t, a, reaper, authz.AtespaceObject("dev-alice"), "can_delete") {
+		t.Error("pattern editor can delete a matching atespace")
+	}
+
+	// Nothing in atespaces the pattern does not match, even ones that share
+	// letters with its prefix.
+	for _, atespace := range []string{"eve", "ci", "development", "bb-dev"} {
+		for _, relation := range []string{"can_get", "can_delete"} {
+			if allowed(t, a, reaper, authz.ActorObject(atespace, "box"), relation) {
+				t.Errorf("pattern editor has %q on an actor in unmatched atespace %q", relation, atespace)
+			}
+		}
+	}
+
+	// Nothing global: no listing across atespaces, no workers.
+	for _, relation := range []string{"owner", "viewer", "can_get", "can_create_atespace"} {
+		if allowed(t, a, reaper, authz.Global(), relation) {
+			t.Errorf("pattern editor has unexpected global relation %q", relation)
+		}
+	}
+
+	// A pattern viewer reads matching atespaces and changes nothing.
+	if !allowed(t, a, reader, authz.ActorObject("dev-alice", "box"), "can_get") {
+		t.Error("pattern viewer cannot get an actor in a matching atespace")
+	}
+	if allowed(t, a, reader, authz.ActorObject("dev-alice", "box"), "can_delete") {
+		t.Error("pattern viewer can delete an actor")
+	}
+
+	// Reconciling a config without the pattern removes it.
+	empty := &authz.Config{Mode: authz.ModeEnforce}
+	b, err := authz.NewAuthorizer(ctx, newServer(t, pool), empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed(t, b, reaper, authz.ActorObject("dev-alice", "box"), "can_delete") {
+		t.Error("a removed pattern binding kept access")
+	}
+}

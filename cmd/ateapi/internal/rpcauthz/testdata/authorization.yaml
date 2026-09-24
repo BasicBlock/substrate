@@ -45,3 +45,9 @@ atespaces:
   eve-demo:
     editors:
     - kubernetes:system:serviceaccount:internal-eve-demo:eve-demo
+atespacePatterns:
+  # A workspace reaper edits every developer's dev-* atespace, including ones
+  # created after the binding, and nothing else.
+  dev-*:
+    editors:
+    - kubernetes:system:serviceaccount:internal-eve:devbox-reaper

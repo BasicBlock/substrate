@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/agent-substrate/substrate/internal/principal"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -32,6 +33,8 @@ const maxTuplesPerWrite = 100
 type Authorizer struct {
 	server *Server
 	mode   Mode
+	// patterns are the prefixes of the config's atespace patterns.
+	patterns []string
 }
 
 // NewAuthorizer reconciles cfg's role bindings into server's store and returns
@@ -40,7 +43,7 @@ func NewAuthorizer(ctx context.Context, server *Server, cfg *Config) (*Authorize
 	if err := server.reconcile(ctx, cfg.tuples()); err != nil {
 		return nil, fmt.Errorf("reconciling authorization bindings: %w", err)
 	}
-	return &Authorizer{server: server, mode: cfg.Mode}, nil
+	return &Authorizer{server: server, mode: cfg.Mode, patterns: cfg.patternPrefixes()}, nil
 }
 
 // Mode returns what to do with a denied call.
@@ -55,7 +58,7 @@ func (a *Authorizer) Allowed(ctx context.Context, p principal.PrincipalInfo, che
 	}
 	groups := memberships(user, p)
 	for i := range checks {
-		allowed, err := a.server.check(ctx, user, checks[i], groups)
+		allowed, err := a.server.check(ctx, user, checks[i], append(a.patternParents(checks[i].Object), groups...))
 		if err != nil {
 			return false, nil, err
 		}
@@ -64,6 +67,18 @@ func (a *Authorizer) Allowed(ctx context.Context, p principal.PrincipalInfo, che
 		}
 	}
 	return true, nil, nil
+}
+
+// patternParents returns the contextual tuples placing an object's atespace
+// under every configured pattern its name matches.
+func (a *Authorizer) patternParents(o Object) []tuple {
+	var out []tuple
+	for _, prefix := range a.patterns {
+		if o.atespace != "" && strings.HasPrefix(o.atespace, prefix) {
+			out = append(out, tuple{User: atespacePatternObject(prefix), Relation: "parent_pattern", Object: AtespaceObject(o.atespace).ID})
+		}
+	}
+	return out
 }
 
 // RecordCreator makes p the creator, and so an owner, of a new atespace.
