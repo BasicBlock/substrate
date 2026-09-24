@@ -52,6 +52,13 @@ type Authorizer struct {
 	// AccessPolicy, cannot be revoked through the API, and lose access once
 	// the server runs without them in its configuration.
 	bootstrapOwners map[string]struct{}
+
+	// patterns are the prefixes of the --authorization-config's
+	// atespacePatterns, set by ReconcileConfig. An atespace whose name starts
+	// with one is placed under its "atespace_pattern:<prefix>" object
+	// (parent_pattern) by a contextual tuple on every Check, the same way
+	// every atespace is placed under global:root.
+	patterns []string
 }
 
 // Mode returns the mode ReconcileConfig last applied, or "" if it was never
@@ -86,7 +93,7 @@ func (a *Authorizer) Check(ctx context.Context, relation, object string) error {
 }
 
 func (a *Authorizer) checkRaw(ctx context.Context, user string, groups []string, relation, object string) (bool, error) {
-	tuples := contextualTuples(object)
+	tuples := a.contextualTuples(object)
 	// The principal's group memberships (GroupAuthenticated, its JWT provider,
 	// and any named claim rule it satisfied) are supplied with the check
 	// rather than stored, so a role binding can name a group no member of it
@@ -142,11 +149,16 @@ func (a *Authorizer) checkRaw(ctx context.Context, user string, groups []string,
 //  2. No write amplification on create: `CreateAtespace`, `CreateActorTemplate`,
 //     and `CreateActor` can insert their rows without opening an OpenFGA write
 //     transaction just to link the parent.
-func contextualTuples(object string) []*openfgav1.TupleKey {
+//
+// An atespace matching one of a.patterns' prefixes gets a parent_pattern
+// tuple the same way, so a binding on "atespace_pattern:<prefix>" reaches
+// every atespace whose name starts with it, including one created after the
+// binding, without storing a tuple per atespace either.
+func (a *Authorizer) contextualTuples(object string) []*openfgav1.TupleKey {
 	objectType, id, _ := strings.Cut(object, ":")
 	switch objectType {
 	case "atespace":
-		return []*openfgav1.TupleKey{parentGlobalTuple(object)}
+		return a.atespaceTuples(object)
 	case "actor", "actor_template":
 		atespace, _, ok := strings.Cut(id, "/")
 		if !ok {
@@ -154,12 +166,15 @@ func contextualTuples(object string) []*openfgav1.TupleKey {
 		}
 		// atespacedID escapes the atespace the same way AtespaceObject does.
 		parent := "atespace:" + atespace
-		return []*openfgav1.TupleKey{
-			{User: parent, Relation: "parent_atespace", Object: object},
-			parentGlobalTuple(parent),
-		}
+		return append([]*openfgav1.TupleKey{{User: parent, Relation: "parent_atespace", Object: object}}, a.atespaceTuples(parent)...)
 	}
 	return nil
+}
+
+// atespaceTuples links an atespace object to global:root and to every pattern
+// its name matches.
+func (a *Authorizer) atespaceTuples(atespaceObject string) []*openfgav1.TupleKey {
+	return append([]*openfgav1.TupleKey{parentGlobalTuple(atespaceObject)}, a.patternParents(atespaceObject)...)
 }
 
 // parentGlobalTuple links an atespace object to global:root.
@@ -169,6 +184,23 @@ func parentGlobalTuple(atespaceObject string) *openfgav1.TupleKey {
 		Relation: "parent_global",
 		Object:   atespaceObject,
 	}
+}
+
+// patternParents returns the contextual tuples placing atespaceObject
+// ("atespace:<name>") under every configured pattern its name matches.
+func (a *Authorizer) patternParents(atespaceObject string) []*openfgav1.TupleKey {
+	name := strings.TrimPrefix(atespaceObject, "atespace:")
+	var out []*openfgav1.TupleKey
+	for _, prefix := range a.patterns {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, &openfgav1.TupleKey{
+				User:     AtespacePatternObject(prefix),
+				Relation: "parent_pattern",
+				Object:   atespaceObject,
+			})
+		}
+	}
+	return out
 }
 
 // RecordCreator makes p the creator, and so an owner (model.fga: "owner:
@@ -248,6 +280,7 @@ func (a *Authorizer) ReconcileConfig(ctx context.Context, cfg *Config) error {
 	slog.InfoContext(ctx, "Reconciled authorization bindings",
 		slog.Int("bindings", len(desired)), slog.Int("written", len(writes)), slog.Int("deleted", len(deletes)))
 	a.mode = cfg.Mode
+	a.patterns = cfg.patternPrefixes()
 	return nil
 }
 

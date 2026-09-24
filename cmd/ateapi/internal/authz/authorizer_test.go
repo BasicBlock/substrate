@@ -78,7 +78,7 @@ func TestContextualTuples(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := contextualTuples(tc.object)
+			got := (&Authorizer{}).contextualTuples(tc.object)
 			if diff := cmp.Diff(tc.want, got, protocmp.Transform()); diff != "" {
 				t.Errorf("contextualTuples(%q) mismatch (-want +got):\n%s", tc.object, diff)
 			}
