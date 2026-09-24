@@ -168,6 +168,9 @@ var rules = map[string]rule{
 	// Only atelet may report capacity, and only for its own node's workers
 	// (cmd/ateapi/internal/ateletauth).
 	ateapipb.WorkerService_SetWorkerCapacity_FullMethodName: handlerAuthorized,
+	// Only atelet may mint an ateom-for-actor certificate; the handler
+	// authenticates it by its SPIFFE ID (cmd/ateapi/internal/workerservice).
+	ateapipb.WorkerService_MintAteomActorCertificate_FullMethodName: handlerAuthorized,
 
 	// The API schema is public.
 	grpc_reflection_v1.ServerReflection_ServerReflectionInfo_FullMethodName:      global("can_get"),
