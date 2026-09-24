@@ -29,6 +29,11 @@ atespaces:
     owners: []
     editors: []
     viewers: []
+atespacePatterns:
+  <prefix>*:            # every atespace whose name starts with <prefix>
+    owners: []
+    editors: []
+    viewers: []
 ```
 
 A binding names one principal as `<provider>:<id>`, where the provider is a
@@ -47,6 +52,17 @@ atespace and an atespace's place under the global scope come from the
 resource names in each request, and a caller's group memberships from its
 authentication, both as contextual tuples.
 
+A pattern binds its roles in every atespace whose name starts with its prefix,
+including atespaces created after the binding: `ws-*` makes its editors
+editors of `ws-alice` and of any `ws-` atespace created later, and nothing in
+`other`. A pattern is a nonempty start of an atespace name followed by one
+`*`. Its bindings are stored on an `atespace_pattern` object named by the
+prefix, reconciled like any other, and each check on an atespace (or an actor
+or template in it) carries a contextual `parent_pattern` tuple for every
+configured pattern its name matches, so an atespace's roles are its own, the
+global scope's and its patterns'. A pattern grants nothing globally: a pattern
+viewer cannot list across atespaces.
+
 Creating an atespace records the caller as its `creator`, which owns it;
 deleting the atespace removes that record, so a later atespace of the same
 name starts unowned. Creator records are not touched by reconciliation.
@@ -61,6 +77,7 @@ name starts unowned. Creator records are not touched by reconciliation.
 | global `viewer`                           | View every atespace; list actors, templates, tags and atespaces across atespaces                                            |
 | global `owner`                            | Own every atespace; workers, worker assignments and actor credential minting                                                |
 | global `atespace_creator`                 | Create atespaces                                                                                                            |
+| pattern `viewer`, `editor`, `owner`       | The atespace role in every atespace whose name matches the pattern                                                         |
 | global `connector`                        | Reach actors' ports through the ingress gateway (`can_connect`) in every atespace, including ones created after the binding; nothing else |
 
 Creating an actor needs `editor` in its atespace and `viewer` on the
@@ -108,10 +125,16 @@ atespaces:
   agents:
     editors:
     - kubernetes:system:serviceaccount:agents:runtime
+atespacePatterns:
+  ws-*:
+    editors:
+    - kubernetes:system:serviceaccount:janitor:runtime
 ```
 
 Each user can create atespaces and use only those and the shared templates;
 the `agents` runtime drives actors in its one atespace and nothing else; the
+janitor edits actors in every `ws-` atespace, including ones created later, and
+nothing else; the
 preview proxy reaches every atespace's actors, including ones created after
 the binding, but cannot get, list, create, update, suspend, resume or delete
 anything; and a principal with no binding, such as any other pod's service
