@@ -221,6 +221,7 @@ func main() {
 	ateletPodInformerFactory, ateletPodInformer := controlapi.AteletInformer(clientset, ateletNamespace)
 	scInformerFactory := informers.NewSharedInformerFactory(clientset, 0)
 	storageClassLister := scInformerFactory.Storage().V1().StorageClasses().Lister()
+	csiNodeLister := scInformerFactory.Storage().V1().CSINodes().Lister()
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -277,6 +278,7 @@ func main() {
 		actorIDJWTAuthorityPool,
 		actorIDCAPool,
 	)
+	controlSrv.UseCSINodes(csiNodeLister)
 
 	// Drive stored ActorTemplates through the golden actor flow.
 	templateReconciler := controlapi.NewActorTemplateReconciler(persistence, controlSrv, *templateResyncInterval)

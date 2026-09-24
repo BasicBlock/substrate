@@ -44,6 +44,7 @@ type RPCService struct {
 	dialer                *AteletDialer
 	sandboxConfigLister   listersv1alpha1.SandboxConfigLister
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
+	csiNodeLister         storagev1listers.CSINodeLister
 	actorWorkflow         *ActorWorkflow
 	workerWorkflow        *WorkerWorkflow
 	instruments           *Instruments
@@ -137,13 +138,22 @@ type serviceStore interface {
 	AcquireLease(ctx context.Context, key string) (*store.Lease, error)
 }
 
+// UseCSINodes lets attach and detach address nodes by the node ID each CSI
+// driver registered in the node's CSINode object (see csiNodePlugin).
+func (s *RPCService) UseCSINodes(nodes storagev1listers.CSINodeLister) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.csiNodeLister = nodes
+}
+
 // GetPlugin retrieves a CSI volume plugin by driver name, dynamically discovering it if not present.
 func (s *RPCService) GetPlugin(ctx context.Context, driverName string) (volume.VolumePluginControlPlane, error) {
 	s.mu.RLock()
 	plugin, ok := s.volumePlugins[driverName]
+	nodes := s.csiNodeLister
 	s.mu.RUnlock()
 	if ok {
-		return plugin, nil
+		return withCSINodeIDs(plugin, driverName, nodes), nil
 	}
 
 	csiPlugin, err := csi.NewCSIPlugin(ctx, s.csiDriverConfigLister, driverName, true /*isController*/)
@@ -154,7 +164,7 @@ func (s *RPCService) GetPlugin(ctx context.Context, driverName string) (volume.V
 	s.mu.Lock()
 	s.volumePlugins[driverName] = csiPlugin
 	s.mu.Unlock()
-	return csiPlugin, nil
+	return withCSINodeIDs(csiPlugin, driverName, nodes), nil
 }
 
 // ServiceImpl implements store.Interface and provides the "middleware" layer
