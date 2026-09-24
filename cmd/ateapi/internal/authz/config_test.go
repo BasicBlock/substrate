@@ -78,6 +78,7 @@ func TestConfigValidate(t *testing.T) {
 			Owners:           []string{"google:alice@example.com"},
 			Viewers:          []string{"group:authenticated"},
 			AtespaceCreators: []string{"group:google/basicblock"},
+			Connectors:       []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"},
 		},
 		Atespaces: map[string]AtespaceBindings{
 			"team1": {
@@ -99,6 +100,7 @@ func TestConfigValidate(t *testing.T) {
 		{"bad mode", Config{Mode: "sometimes"}},
 		{"unknown provider", Config{Mode: ModeEnforce, Global: GlobalBindings{Owners: []string{"github:alice"}}}},
 		{"unknown group", Config{Mode: ModeEnforce, Global: GlobalBindings{Owners: []string{"group:nope"}}}},
+		{"unknown connector provider", Config{Mode: ModeEnforce, Global: GlobalBindings{Connectors: []string{"github:someone"}}}},
 		{"malformed ref", Config{Mode: ModeEnforce, Global: GlobalBindings{Owners: []string{"alice@example.com"}}}},
 		{"empty id", Config{Mode: ModeEnforce, Global: GlobalBindings{Owners: []string{"google:"}}}},
 		{"invalid atespace name", Config{Mode: ModeEnforce, Atespaces: map[string]AtespaceBindings{"Bad Name!": {}}}},
@@ -118,6 +120,7 @@ func TestConfigTuples(t *testing.T) {
 		Global: GlobalBindings{
 			Owners:           []string{"google:alice@example.com"},
 			AtespaceCreators: []string{"group:google/basicblock"},
+			Connectors:       []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"},
 		},
 		Atespaces: map[string]AtespaceBindings{
 			"team1": {Owners: []string{"mtls:spiffe://ns/sa"}},
@@ -128,7 +131,10 @@ func TestConfigTuples(t *testing.T) {
 	want := map[bindingKey]bool{
 		{user: "user:alice@example.com", relation: RoleOwner, object: GlobalRootObject}:                  true,
 		{user: "group:google/basicblock#member", relation: "atespace_creator", object: GlobalRootObject}: true,
-		{user: "user:spiffe%3A//ns/sa", relation: RoleOwner, object: "atespace:team1"}:                   true,
+		// The "kubernetes" provider segment is dropped, like every other
+		// principal reference (see configMember's doc comment).
+		{user: "user:system%3Aserviceaccount%3Ainternal-preview%3Apreview-proxy", relation: "connector", object: GlobalRootObject}: true,
+		{user: "user:spiffe%3A//ns/sa", relation: RoleOwner, object: "atespace:team1"}: true,
 	}
 	if len(tuples) != len(want) {
 		t.Fatalf("len(tuples) = %d, want %d (%+v)", len(tuples), len(want), tuples)
@@ -253,5 +259,73 @@ func TestReconcileConfigAndAtespaceLifecycle(t *testing.T) {
 	}
 	if err := authorizer.Check(alice, RelationCanDelete, AtespaceObject("team1")); err != nil {
 		t.Errorf("alice should still be the global owner: %v", err)
+	}
+}
+
+// TestConnectorsConnectEverywhereAndNothingElse verifies the global connectors
+// list grants can_connect on actors in any atespace, including one never
+// mentioned in configuration, and nothing else: no other actor relation, no
+// atespace role, and no global role.
+func TestConnectorsConnectEverywhereAndNothingElse(t *testing.T) {
+	ctx := context.Background()
+	pool := startPostgres(t)
+
+	fgaServer, err := NewOpenFGAServer(pool)
+	if err != nil {
+		t.Fatalf("NewOpenFGAServer: %v", err)
+	}
+	t.Cleanup(fgaServer.Close)
+
+	authorizer, _, err := New(ctx, pool, fgaServer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cfg := &Config{
+		Mode:   ModeEnforce,
+		Global: GlobalBindings{Connectors: []string{"kubernetes:system:serviceaccount:internal-preview:preview-proxy"}},
+	}
+	if err := authorizer.ReconcileConfig(ctx, cfg); err != nil {
+		t.Fatalf("ReconcileConfig: %v", err)
+	}
+
+	proxy := principal.InjectContext(ctx, principal.PrincipalInfo{ID: "system:serviceaccount:internal-preview:preview-proxy", Kind: principal.KindJWT, Provider: "kubernetes"})
+
+	// can_connect on actors in atespaces the connector was never bound to,
+	// created on demand.
+	for _, atespace := range []string{"dev-alice", "dev-someone-new"} {
+		if err := authorizer.Check(proxy, "can_connect", ActorObject(atespace, "box")); err != nil {
+			t.Errorf("connector cannot can_connect on an actor in unbound atespace %q: %v", atespace, err)
+		}
+	}
+
+	// Nothing else on the actor.
+	for _, relation := range []string{RelationCanGet, RelationCanUpdate, RelationCanDelete, RelationCanResume, RelationCanSuspend, RelationCanRevert} {
+		if err := authorizer.Check(proxy, relation, ActorObject("dev-alice", "box")); err == nil {
+			t.Errorf("connector has unexpected actor relation %q", relation)
+		}
+	}
+
+	// Nothing on the atespace.
+	for _, relation := range []string{RoleOwner, RoleEditor, RoleViewer, RelationCanGet, RelationCanDelete, RelationCanCreateActor, RelationCanCreateActorTemplate} {
+		if err := authorizer.Check(proxy, relation, AtespaceObject("dev-alice")); err == nil {
+			t.Errorf("connector has unexpected atespace relation %q", relation)
+		}
+	}
+
+	// Nothing on the global scope beyond the connector relation itself.
+	for _, relation := range []string{RoleOwner, RoleViewer, "atespace_creator", RelationCanCreateAtespace, RelationCanGet, RelationCanCreateAccessPolicy, RelationCanGetAccessPolicy} {
+		if err := authorizer.Check(proxy, relation, GlobalRootObject); err == nil {
+			t.Errorf("connector has unexpected global relation %q", relation)
+		}
+	}
+
+	// Reconciling a config without the connector removes it.
+	empty := &Config{Mode: ModeEnforce}
+	if err := authorizer.ReconcileConfig(ctx, empty); err != nil {
+		t.Fatalf("ReconcileConfig (empty): %v", err)
+	}
+	if err := authorizer.Check(proxy, "can_connect", ActorObject("dev-alice", "box")); err == nil {
+		t.Error("a removed connector binding kept access")
 	}
 }

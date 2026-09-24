@@ -1,8 +1,8 @@
 # ate-api Authorization
 
 `ate-api` authorizes every RPC against the OpenFGA model in
-`cmd/ateapi/internal/authz/model.fga`, evaluated by the OpenFGA server it embeds on its
-PostgreSQL store. It is configured with the file passed to
+`cmd/ateapi/internal/authz/model.fga`, evaluated by the OpenFGA server it
+embeds on its PostgreSQL store. It is configured with the file passed to
 `--authorization-config`.
 
 Without that flag, authorization follows `--experimental-enable-authz` and
@@ -25,6 +25,7 @@ global:
   owners: []            # everything: every atespace and the workers
   viewers: []           # read every atespace; list across atespaces
   atespaceCreators: []  # create atespaces, each owned by its creator
+  connectors: []        # can_connect on every actor in every atespace, nothing else
 atespaces:
   <name>:               # the atespace need not exist yet
     owners: []
@@ -62,6 +63,7 @@ name starts unowned. Creator records are not touched by reconciliation.
 | global `viewer`                           | View every atespace; list actors, templates, tags and atespaces across atespaces                                            |
 | global `owner`                            | Own every atespace; workers, worker assignments and actor credential minting                                                |
 | global `atespace_creator`                 | Create atespaces                                                                                                            |
+| global `connector`                        | Reach actors' ports through the ingress gateway (`can_connect`) in every atespace, including one created on demand, and nothing else |
 
 Creating an actor needs `editor` in its atespace and `viewer` on the
 template's (and a source tag's) atespace, which may be another one. A test
@@ -101,6 +103,8 @@ global:
   - mtls:spiffe://cluster.local/ns/ate-system/sa/atelet
   atespaceCreators:
   - group:google/example       # the domain's users
+  connectors:
+  - kubernetes:system:serviceaccount:internal-preview:preview-proxy
 atespaces:
   templates:
     viewers:
@@ -111,9 +115,11 @@ atespaces:
 ```
 
 Each user can create atespaces and use only those and the shared templates;
-the `agents` runtime drives actors in its one atespace and nothing else; and a
-principal with no binding, such as any other pod's service account, can do
-nothing.
+the `agents` runtime drives actors in its one atespace and nothing else; the
+in-cluster preview proxy can reach any actor's ports through the ingress
+gateway (`can_connect`, see [CheckActorAccess](#ingress)) in any atespace,
+including one created on demand, and nothing else; and a principal with no
+binding, such as any other pod's service account, can do nothing.
 
 ## Ingress
 
@@ -122,8 +128,8 @@ ate-api. With `--ingress-authorization=enforce` it takes each request's token
 from the first of `--ingress-token-headers` present (default
 `ate-authorization`; a `Bearer ` prefix is optional), asks ate-api's
 `CheckActorAccess` whether it authenticates and its principal has
-`can_connect` on the addressed actor (editor of its atespace), and only then
-resumes and routes to the actor. A request without a token that authenticates
+`can_connect` on the addressed actor (editor of its atespace, or a global
+connector), and only then resumes and routes to the actor. A request without a token that authenticates
 is answered 401, and one without access 403. `audit` logs `Ingress
 authorization would deny request (audit mode)` and forwards it anyway. Token
 headers, and any `--ingress-strip-headers`, are removed before the request

@@ -66,6 +66,12 @@ type GlobalBindings struct {
 	Viewers []string `json:"viewers,omitempty"`
 	// AtespaceCreators may create atespaces, each becoming its creator's.
 	AtespaceCreators []string `json:"atespaceCreators,omitempty"`
+	// Connectors reach can_connect on every actor in every atespace (for
+	// example an in-cluster proxy reaching actors across atespaces created on
+	// demand) and nothing else: no get/list/create/update/suspend/resume/
+	// delete, no templates, tags, egress policies or workers, and no
+	// credential minting.
+	Connectors []string `json:"connectors,omitempty"`
 }
 
 // AtespaceBindings are one atespace's roles.
@@ -141,6 +147,9 @@ func (c *Config) Validate(providers, ruleGroups []string) error {
 	if err := check("global.atespaceCreators", c.Global.AtespaceCreators); err != nil {
 		return err
 	}
+	if err := check("global.connectors", c.Global.Connectors); err != nil {
+		return err
+	}
 	for name, b := range c.Atespaces {
 		if !resources.IsValidResourceName(name) {
 			return fmt.Errorf("atespaces: %q is not a valid atespace name", name)
@@ -191,6 +200,7 @@ func (c *Config) tuples() []*openfgav1.TupleKey {
 	add(GlobalRootObject, RoleOwner, c.Global.Owners)
 	add(GlobalRootObject, RoleViewer, c.Global.Viewers)
 	add(GlobalRootObject, "atespace_creator", c.Global.AtespaceCreators)
+	add(GlobalRootObject, "connector", c.Global.Connectors)
 	for name, b := range c.Atespaces {
 		object := AtespaceObject(name)
 		add(object, RoleOwner, b.Owners)
@@ -209,7 +219,7 @@ type bindingKey struct{ user, relation, object string }
 // relation.
 func managed(k bindingKey) bool {
 	if k.object == GlobalRootObject {
-		return k.relation == RoleOwner || k.relation == RoleViewer || k.relation == "atespace_creator"
+		return k.relation == RoleOwner || k.relation == RoleViewer || k.relation == "atespace_creator" || k.relation == "connector"
 	}
 	if strings.HasPrefix(k.object, "atespace:") {
 		return k.relation == RoleOwner || k.relation == RoleEditor || k.relation == RoleViewer
