@@ -152,6 +152,16 @@ const (
 	// (currently DurableDir-typed volumes). Memory and the rest of rootfs are
 	// excluded.
 	SnapshotScope_SNAPSHOT_SCOPE_DATA SnapshotScope = 2
+	// Capture the full filesystem delta on top of the OCI image (including any
+	// attached DurableDir volumes), without process memory. A restore from this
+	// scope is a cold boot of the containers from the image with that
+	// filesystem restored, not a `runsc restore` -- portable across worker
+	// CPU/machine families. gVisor only.
+	//
+	// Value 3 (not 4): upstream's #2105 removed SNAPSHOT_SCOPE_DATA_ON_GOLDEN,
+	// which held 3, before this scope was added; this reclaims it rather than
+	// leaving it permanently retired.
+	SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM SnapshotScope = 3
 )
 
 // Enum value maps for SnapshotScope.
@@ -160,11 +170,13 @@ var (
 		0: "SNAPSHOT_SCOPE_UNSPECIFIED",
 		1: "SNAPSHOT_SCOPE_FULL",
 		2: "SNAPSHOT_SCOPE_DATA",
+		3: "SNAPSHOT_SCOPE_FILESYSTEM",
 	}
 	SnapshotScope_value = map[string]int32{
 		"SNAPSHOT_SCOPE_UNSPECIFIED": 0,
 		"SNAPSHOT_SCOPE_FULL":        1,
 		"SNAPSHOT_SCOPE_DATA":        2,
+		"SNAPSHOT_SCOPE_FILESYSTEM":  3,
 	}
 )
 
@@ -3224,11 +3236,12 @@ const file_atelet_proto_rawDesc = "" +
 	"\x0eCheckpointType\x12\x1f\n" +
 	"\x1bCHECKPOINT_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15CHECKPOINT_TYPE_LOCAL\x10\x01\x12\x1c\n" +
-	"\x18CHECKPOINT_TYPE_EXTERNAL\x10\x02*a\n" +
+	"\x18CHECKPOINT_TYPE_EXTERNAL\x10\x02*\x80\x01\n" +
 	"\rSnapshotScope\x12\x1e\n" +
 	"\x1aSNAPSHOT_SCOPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_FULL\x10\x01\x12\x17\n" +
-	"\x13SNAPSHOT_SCOPE_DATA\x10\x022\xb1\x02\n" +
+	"\x13SNAPSHOT_SCOPE_DATA\x10\x02\x12\x1d\n" +
+	"\x19SNAPSHOT_SCOPE_FILESYSTEM\x10\x032\xb1\x02\n" +
 	"\fAteomSupport\x12c\n" +
 	"\x14MintActorCertificate\x12#.atelet.MintActorCertificateRequest\x1a$.atelet.MintActorCertificateResponse\"\x00\x12Z\n" +
 	"\x11SetWorkerCapacity\x12 .atelet.SetWorkerCapacityRequest\x1a!.atelet.SetWorkerCapacityResponse\"\x00\x12`\n" +

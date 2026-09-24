@@ -40,6 +40,11 @@ func TestSnapshotScopeToAtelet(t *testing.T) {
 			expected: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA,
 		},
 		{
+			name:     "Filesystem scope",
+			in:       ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM,
+			expected: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM,
+		},
+		{
 			name:     "Default scope (unspecified)",
 			in:       ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED,
 			expected: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,

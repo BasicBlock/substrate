@@ -443,6 +443,16 @@ enum SnapshotScope {
   // (currently DurableDir-typed volumes). Memory and the rest of rootfs are
   // excluded.
   SNAPSHOT_SCOPE_DATA = 2;
+  // Capture the full filesystem delta on top of the OCI image (including any
+  // attached DurableDir volumes), without process memory. A restore from this
+  // scope is a cold boot of the containers from the image with that
+  // filesystem restored, not a `runsc restore` -- portable across worker
+  // CPU/machine families. gVisor only.
+  //
+  // Value 3 (not 4): upstream's #2105 removed SNAPSHOT_SCOPE_DATA_ON_GOLDEN,
+  // which held 3, before this scope was added; this reclaims it rather than
+  // leaving it permanently retired.
+  SNAPSHOT_SCOPE_FILESYSTEM = 3;
 }
 
 // ExternalRestoreConfiguration is an external snapshot a restore reads.

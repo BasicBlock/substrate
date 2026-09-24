@@ -21,10 +21,14 @@ import (
 )
 
 func actorSnapshotContentScopeToAtelet(in ateapipb.SnapshotContentScope) ateletpb.SnapshotScope {
-	if in == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA {
+	switch in {
+	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA:
 		return ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA
+	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM:
+		return ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
+	default:
+		return ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL
 	}
-	return ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL
 }
 
 // sandboxClassString renders the proto enum in the CRD's lower-case string

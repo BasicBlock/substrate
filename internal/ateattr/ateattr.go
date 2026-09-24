@@ -324,9 +324,10 @@ const (
 
 // Values for SnapshotScopeKey, mirroring ateletpb.SnapshotScope.
 const (
-	SnapshotScopeFull    = "full"
-	SnapshotScopeData    = "data"
-	SnapshotScopeUnknown = "unknown"
+	SnapshotScopeFull       = "full"
+	SnapshotScopeFilesystem = "filesystem"
+	SnapshotScopeData       = "data"
+	SnapshotScopeUnknown    = "unknown"
 )
 
 // SnapshotScopeValue maps the wire enum onto its label value, shared so ateapi
@@ -337,6 +338,8 @@ func SnapshotScopeValue(scope ateletpb.SnapshotScope) string {
 	switch scope {
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		return SnapshotScopeFull
+	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+		return SnapshotScopeFilesystem
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		return SnapshotScopeData
 	default:

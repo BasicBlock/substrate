@@ -273,6 +273,16 @@ enum SnapshotScope {
   // (currently DurableDir-typed volumes). Memory and the rest of rootfs are
   // excluded.
   SNAPSHOT_SCOPE_DATA = 2;
+  // Capture the full filesystem delta on top of the OCI image (including any
+  // attached DurableDir volumes), without process memory. RestoreWorkload
+  // handles this scope as a cold boot: create the containers with a
+  // filesystem checkpoint to restore and start them normally, rather than
+  // `runsc restore`. gVisor only.
+  //
+  // Value 3 (not 4): upstream's #2105 removed SNAPSHOT_SCOPE_DATA_ON_GOLDEN,
+  // which held 3, before this scope was added; this reclaims it rather than
+  // leaving it permanently retired.
+  SNAPSHOT_SCOPE_FILESYSTEM = 3;
 }
 
 message CheckpointWorkloadRequest {
