@@ -537,6 +537,33 @@ func validateSuspendActorRequest(ctx context.Context, req *ateapipb.SuspendActor
 	return Validate_SuspendActorRequest(ctx, op, nil, req, nil)
 }
 
+func (s *RPCService) DropSnapshotMemory(ctx context.Context, req *ateapipb.DropSnapshotMemoryRequest) (*ateapipb.DropSnapshotMemoryResponse, error) {
+	if errs := validateDropSnapshotMemoryRequest(ctx, req); len(errs) > 0 {
+		return nil, toGRPCStatusError(errs)
+	}
+	actorRef := resources.ActorRefFromObjectRef(req.GetActor())
+	setSpanActorRefAttributes(ctx, actorRef)
+
+	actor, err := s.actorWorkflow.DropSnapshotMemory(ctx, actorRef)
+	if err != nil {
+		if errors.Is(err, store.ErrVersionConflict) {
+			return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "Actor %s not found", actorRef)
+		}
+		return nil, err
+	}
+	setSpanActorAttributes(ctx, actor)
+	return &ateapipb.DropSnapshotMemoryResponse{Actor: actor}, nil
+}
+
+func validateDropSnapshotMemoryRequest(ctx context.Context, req *ateapipb.DropSnapshotMemoryRequest) field.ErrorList {
+	// Call the generated validation.
+	op := operation.Operation{Type: operation.Create}
+	return Validate_DropSnapshotMemoryRequest(ctx, op, nil, req, nil)
+}
+
 func (s *RPCService) RevertActor(ctx context.Context, req *ateapipb.RevertActorRequest) (*ateapipb.RevertActorResponse, error) {
 	if errs := validateRevertActorRequest(ctx, req); len(errs) > 0 {
 		return nil, toGRPCStatusError(errs)
