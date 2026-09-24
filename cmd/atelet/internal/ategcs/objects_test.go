@@ -74,7 +74,7 @@ func TestDeleteIfExists(t *testing.T) {
 		if err := store.PutObject(ctx, "bkt", "obj", bytes.NewReader([]byte("data"))); err != nil {
 			t.Fatalf("PutObject: %v", err)
 		}
-		if err := DeleteIfExists(ctx, store, "bkt", "obj"); err != nil {
+		if err := DeleteIfExists(ctx, store, "gs://bkt/obj"); err != nil {
 			t.Fatalf("DeleteIfExists: %v", err)
 		}
 		if _, ok := store.m["bkt/obj"]; ok {
@@ -84,7 +84,7 @@ func TestDeleteIfExists(t *testing.T) {
 
 	t.Run("already gone is not an error", func(t *testing.T) {
 		store := newMemStore()
-		if err := DeleteIfExists(ctx, store, "bkt", "obj"); err != nil {
+		if err := DeleteIfExists(ctx, store, "gs://bkt/obj"); err != nil {
 			t.Fatalf("DeleteIfExists: %v", err)
 		}
 	})

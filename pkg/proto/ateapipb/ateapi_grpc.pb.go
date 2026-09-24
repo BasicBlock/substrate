@@ -42,6 +42,7 @@ const (
 	Control_CheckActorAccess_FullMethodName           = "/ateapi.Control/CheckActorAccess"
 	Control_RevertActor_FullMethodName                = "/ateapi.Control/RevertActor"
 	Control_DeleteActor_FullMethodName                = "/ateapi.Control/DeleteActor"
+	Control_DropSnapshotMemory_FullMethodName         = "/ateapi.Control/DropSnapshotMemory"
 	Control_GetActorEgressPolicy_FullMethodName       = "/ateapi.Control/GetActorEgressPolicy"
 	Control_CreateActorEgressPolicy_FullMethodName    = "/ateapi.Control/CreateActorEgressPolicy"
 	Control_UpdateActorEgressPolicy_FullMethodName    = "/ateapi.Control/UpdateActorEgressPolicy"
@@ -103,6 +104,14 @@ type ControlClient interface {
 	// Delete an actor. Only suspended or crashed actors can be deleted unless
 	// any_state is set.
 	DeleteActor(ctx context.Context, in *DeleteActorRequest, opts ...grpc.CallOption) (*Actor, error)
+	// DropSnapshotMemory converts a SUSPENDED actor's stored Full snapshot into
+	// a Filesystem one in place: the recorded scope updates and the snapshot's
+	// memory objects are deleted from storage, keeping its filesystem image and
+	// durable data. Idempotent; refuses an actor that is not SUSPENDED or whose
+	// snapshot has no filesystem image to fall back to. Intended for a
+	// long-suspended actor (e.g. a workspace idle for days) whose memory
+	// snapshot's storage cost is no longer worth a hot-memory restore.
+	DropSnapshotMemory(ctx context.Context, in *DropSnapshotMemoryRequest, opts ...grpc.CallOption) (*DropSnapshotMemoryResponse, error)
 	// Get the egress policy resource nested under an Actor.
 	GetActorEgressPolicy(ctx context.Context, in *GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*EgressPolicy, error)
 	// Create the egress policy resource nested under an Actor.
@@ -265,6 +274,16 @@ func (c *controlClient) DeleteActor(ctx context.Context, in *DeleteActorRequest,
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Actor)
 	err := c.cc.Invoke(ctx, Control_DeleteActor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlClient) DropSnapshotMemory(ctx context.Context, in *DropSnapshotMemoryRequest, opts ...grpc.CallOption) (*DropSnapshotMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DropSnapshotMemoryResponse)
+	err := c.cc.Invoke(ctx, Control_DropSnapshotMemory_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -573,6 +592,14 @@ type ControlServer interface {
 	// Delete an actor. Only suspended or crashed actors can be deleted unless
 	// any_state is set.
 	DeleteActor(context.Context, *DeleteActorRequest) (*Actor, error)
+	// DropSnapshotMemory converts a SUSPENDED actor's stored Full snapshot into
+	// a Filesystem one in place: the recorded scope updates and the snapshot's
+	// memory objects are deleted from storage, keeping its filesystem image and
+	// durable data. Idempotent; refuses an actor that is not SUSPENDED or whose
+	// snapshot has no filesystem image to fall back to. Intended for a
+	// long-suspended actor (e.g. a workspace idle for days) whose memory
+	// snapshot's storage cost is no longer worth a hot-memory restore.
+	DropSnapshotMemory(context.Context, *DropSnapshotMemoryRequest) (*DropSnapshotMemoryResponse, error)
 	// Get the egress policy resource nested under an Actor.
 	GetActorEgressPolicy(context.Context, *GetActorEgressPolicyRequest) (*EgressPolicy, error)
 	// Create the egress policy resource nested under an Actor.
@@ -677,6 +704,9 @@ func (UnimplementedControlServer) RevertActor(context.Context, *RevertActorReque
 }
 func (UnimplementedControlServer) DeleteActor(context.Context, *DeleteActorRequest) (*Actor, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteActor not implemented")
+}
+func (UnimplementedControlServer) DropSnapshotMemory(context.Context, *DropSnapshotMemoryRequest) (*DropSnapshotMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DropSnapshotMemory not implemented")
 }
 func (UnimplementedControlServer) GetActorEgressPolicy(context.Context, *GetActorEgressPolicyRequest) (*EgressPolicy, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetActorEgressPolicy not implemented")
@@ -938,6 +968,24 @@ func _Control_DeleteActor_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlServer).DeleteActor(ctx, req.(*DeleteActorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Control_DropSnapshotMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DropSnapshotMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).DropSnapshotMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_DropSnapshotMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).DropSnapshotMemory(ctx, req.(*DropSnapshotMemoryRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1470,6 +1518,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteActor",
 			Handler:    _Control_DeleteActor_Handler,
+		},
+		{
+			MethodName: "DropSnapshotMemory",
+			Handler:    _Control_DropSnapshotMemory_Handler,
 		},
 		{
 			MethodName: "GetActorEgressPolicy",

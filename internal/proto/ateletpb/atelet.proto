@@ -90,6 +90,25 @@ service AteomHerder {
   // Terminate tells atelet to terminate/kill any running workload for an actor,
   // unmount its volumes, and clean up actor state on the node.
   rpc Terminate(TerminateRequest) returns (TerminateResponse) {}
+
+  // DropSnapshotMemory rewrites a stored external Full snapshot in place into
+  // a Filesystem one: it deletes the memory checkpoint's objects and rewrites
+  // the manifest to list only the filesystem image and durable data, keeping
+  // both. Drives no ateom -- this is pure object-storage rewriting, so any
+  // atelet can serve it, not only one on the actor's (long gone) node. Refuses
+  // a snapshot that is not Full scope, or that has no filesystem image (it
+  // predates FILESYSTEM-scope support). Idempotent: a snapshot already scoped
+  // Filesystem succeeds without rewriting anything.
+  rpc DropSnapshotMemory(DropSnapshotMemoryRequest) returns (DropSnapshotMemoryResponse) {}
+}
+
+message DropSnapshotMemoryRequest {
+  // The object storage URI of the actor's external snapshot to narrow from
+  // Full to Filesystem scope.
+  string snapshot_uri = 1;
+}
+
+message DropSnapshotMemoryResponse {
 }
 
 message TerminateRequest {
