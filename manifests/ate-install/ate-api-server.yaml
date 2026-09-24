@@ -29,7 +29,8 @@ rules:
   resources: ["workerpools"]
   verbs: ["get", "watch", "list"]
 - apiGroups: ["storage.k8s.io"]
-  resources: ["storageclasses"]
+  # csinodes: attach and detach address a node by its CSI driver's node ID.
+  resources: ["storageclasses", "csinodes"]
   verbs: ["get", "watch", "list"]
 ---
 # Create Service Account for Workload Identity
