@@ -393,7 +393,7 @@ func TestDialAnyAtelet(t *testing.T) {
 	}
 
 	t.Run("no atelet pods available", func(t *testing.T) {
-		d := NewAteletDialer(newTestAteletIndexer(t), "", "")
+		d := NewAteletDialer(newTestAteletIndexer(t), installdefaults.AteletSPIFFEID(installdefaults.SystemNamespace), "", "")
 		if _, err := d.DialAnyAtelet(); !errors.Is(err, ErrNoAteletOnNode) {
 			t.Fatalf("DialAnyAtelet = %v, want ErrNoAteletOnNode", err)
 		}
@@ -402,7 +402,7 @@ func TestDialAnyAtelet(t *testing.T) {
 	t.Run("dials an atelet regardless of node", func(t *testing.T) {
 		d := NewAteletDialer(newTestAteletIndexer(t,
 			ateletPod("atelet-1", "uid-1", "node1", "10.0.0.1"),
-		), "", "", WithDialCredentials(func(string) (credentials.TransportCredentials, error) {
+		), installdefaults.AteletSPIFFEID(installdefaults.SystemNamespace), "", "", WithDialCredentials(func(string) (credentials.TransportCredentials, error) {
 			return insecure.NewCredentials(), nil
 		}))
 
