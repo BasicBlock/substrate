@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
@@ -1190,13 +1191,17 @@ type capturingAtelet struct {
 	mu      sync.Mutex
 	restore *ateletpb.RestoreRequest
 	run     *ateletpb.RunRequest
+	// restoredViaFilesystemFallback is echoed on every Restore response, so a
+	// test can simulate atelet reporting a Full-restore-to-Filesystem
+	// fallback (see ateletpb.RestoreResponse's field doc).
+	restoredViaFilesystemFallback bool
 }
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.restore = proto.Clone(req).(*ateletpb.RestoreRequest)
-	return &ateletpb.RestoreResponse{}, nil
+	return &ateletpb.RestoreResponse{RestoredViaFilesystemFallback: f.restoredViaFilesystemFallback}, nil
 }
 
 func (f *capturingAtelet) Run(ctx context.Context, req *ateletpb.RunRequest) (*ateletpb.RunResponse, error) {
@@ -1281,6 +1286,57 @@ func newWireCaptureWorkflow(t *testing.T, persistence store.Interface) (*ActorWo
 	}})
 
 	return &ActorWorkflow{store: persistence, dialer: dialer, sandboxConfigLister: lister}, fake
+}
+
+// TestEnsureAteletRestored_FilesystemFallback pins that when atelet reports a
+// Full-restore-to-Filesystem fallback (ateletpb.RestoreResponse's field), the
+// resume workflow surfaces it on the restore telemetry rather than reporting
+// the requested Full scope as though nothing happened.
+func TestEnsureAteletRestored_FilesystemFallback(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	w, atelet := newWireCaptureWorkflow(t, persistence)
+	atelet.restoredViaFilesystemFallback = true
+
+	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
+	tmpl, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
+		SnapshotsConfig: &ateapipb.SnapshotsConfig{
+			StorageLocation: testStorageLocation,
+			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnResume:        &ateapipb.OnResumeConfig{FromData: ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT},
+		},
+		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor"},
+	})
+	if err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapipb.ActorState_ACTOR_STATE_PAUSED, func(a *ateapipb.Actor) {
+		a.Status.WorkerAssignment = wireTestAssignment()
+		a.Status.LocalSnapshotInfo = &ateapipb.LocalSnapshotInfo{SnapshotName: "snap-1", NodeVmsWithLocalSnapshots: []string{"node-1"}}
+		a.Status.CurrentActorTemplateUid = tmpl.GetMetadata().GetUid()
+	})
+
+	actor, loadedTmpl, src, err := w.loadActorForResume(ctx, actorRef)
+	if err != nil {
+		t.Fatalf("loadActorForResume: %v", err)
+	}
+	tele, err := w.ensureAteletRestored(ctx, actorRef, actor, loadedTmpl, src)
+	if err != nil {
+		t.Fatalf("ensureAteletRestored: %v", err)
+	}
+	if tele.WireSnapshotScope != ateattr.SnapshotScopeFilesystem {
+		t.Errorf("WireSnapshotScope = %q, want %q (the fallback's actual scope, not the requested %q)",
+			tele.WireSnapshotScope, ateattr.SnapshotScopeFilesystem, ateattr.SnapshotScopeFull)
+	}
+
+	restore, _ := atelet.requests()
+	if restore.GetScope() != ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL {
+		t.Errorf("atelet request scope = %v, want %v (atelet -- not ateapi -- performs the fallback retry)",
+			restore.GetScope(), ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL)
+	}
 }
 
 // TestResumeActor_AteletWireRequest is the characteristic test for the

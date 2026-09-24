@@ -135,6 +135,16 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	return actor, true, nil
 }
 
+// logRestoredViaFilesystemFallback surfaces atelet's Full-restore-to-Filesystem
+// fallback at the control-plane layer (see ateletpb.RestoreResponse's field
+// doc and ateattr.RestoreFallbackKey), so it is visible in the actor's own log
+// stream and correlatable across the fleet, not only in the single node's
+// atelet logs.
+func logRestoredViaFilesystemFallback(ctx context.Context, actorRef resources.ActorRef) {
+	slog.LogAttrs(ctx, slog.LevelWarn, "Actor resumed via a filesystem-image fallback after its Full restore failed",
+		ateattr.ActorRefLogAttrs(actorRef)...)
+}
+
 // validateGoldenSnapshotScope rejects a golden snapshot that does not carry
 // the guest state (memory + fs delta) a restore needs. Golden actors always
 // commit Full (commitSnapshotScope), so this only trips on golden snapshots
@@ -711,7 +721,11 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 		tele.WireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)
 
-		_, err = client.Restore(ctx, req)
+		resp, err := client.Restore(ctx, req)
+		if resp.GetRestoredViaFilesystemFallback() {
+			logRestoredViaFilesystemFallback(ctx, actorRef)
+			tele.WireSnapshotScope = ateattr.SnapshotScopeFilesystem
+		}
 		return tele, maybeCrashActor(ctx, w.store, actorRef, err, "while restoring workload", ateattr.OperationResume)
 	} else if !src.SnapshotURI.IsZero() {
 		slog.InfoContext(ctx, "Actor has durable snapshot; Restoring from snapshot")
@@ -754,7 +768,11 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			CpuMilli:          cpuMilli,
 			MemoryBytes:       memBytes,
 		}
-		_, err = client.Restore(ctx, req)
+		resp, err := client.Restore(ctx, req)
+		if resp.GetRestoredViaFilesystemFallback() {
+			logRestoredViaFilesystemFallback(ctx, actorRef)
+			tele.WireSnapshotScope = ateattr.SnapshotScopeFilesystem
+		}
 		return tele, maybeCrashActor(ctx, w.store, actorRef, err, "while restoring durable snapshot", ateattr.OperationResume)
 	} else {
 		slog.InfoContext(ctx, "Actor has no snapshot; Booting from ActorTemplate spec")
