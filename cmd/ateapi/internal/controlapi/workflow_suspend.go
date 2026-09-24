@@ -135,12 +135,19 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 		return nil, status.Errorf(codes.FailedPrecondition, "MarkSuspending prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, got, ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
 	// A paused-origin suspend uploads what the pause captured; it cannot
-	// fabricate the memory a Full commit needs from a Data-only capture.
-	// Reject before leaving PAUSED so the actor stays resumable.
-	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED &&
-		pausedContentScope(actor.GetStatus().GetLocalSnapshotInfo(), actorTemplate) == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA &&
-		commitSnapshotScope(actorRef.Atespace, actorTemplate) == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
-		return nil, status.Errorf(codes.FailedPrecondition, "actor %s paused with a Data snapshot; the template commits Full, which a paused-origin suspend cannot produce", actorRef)
+	// fabricate content the commit scope needs but the pause never captured
+	// (e.g. the memory a Full commit needs from a Filesystem or Data-only
+	// capture, or the filesystem image a Filesystem commit needs from Data).
+	// Reject before leaving PAUSED so the actor stays resumable. Ranks compare
+	// containment (FULL ⊇ FILESYSTEM ⊇ DATA), not the raw enum values.
+	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED {
+		paused := pausedContentScope(actor.GetStatus().GetLocalSnapshotInfo(), actorTemplate)
+		commit := commitSnapshotScope(actorRef.Atespace, actorTemplate)
+		pausedRank, pausedOK := snapshotContentScopeRank(paused)
+		commitRank, commitOK := snapshotContentScopeRank(commit)
+		if pausedOK && commitOK && commitRank > pausedRank {
+			return nil, status.Errorf(codes.FailedPrecondition, "actor %s paused with a %s snapshot; the template commits %s, which a paused-origin suspend cannot produce", actorRef, paused, commit)
+		}
 	}
 
 	// Fail here rather than at checkpoint time if the template's location

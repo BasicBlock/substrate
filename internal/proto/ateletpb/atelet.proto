@@ -474,4 +474,11 @@ message RestoreRequest {
 }
 
 message RestoreResponse {
+  // restored_via_filesystem_fallback is true when a Full restore's memory
+  // restore failed (e.g. an incompatible CPU feature set, a restore-spec
+  // validation change, or an old image) and atelet fell back to a cold boot
+  // from the snapshot's filesystem image instead of failing the actor. Always
+  // false for a restore that was not scope Full, and for a Full restore that
+  // succeeded normally or that carried no filesystem image to fall back to.
+  bool restored_via_filesystem_fallback = 1;
 }

@@ -604,6 +604,7 @@ func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
 		}
 	}
 	fullScope := ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
+	filesystemScope := ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM
 	dataScope := ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 	tests := []struct {
 		name     string
@@ -615,6 +616,11 @@ func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
 		{"data capture commits data", dataScope, tmpl(dataScope, dataScope), false},
 		{"full capture commits full", fullScope, tmpl(fullScope, fullScope), false},
 		{"full capture commits data via conversion", fullScope, tmpl(fullScope, dataScope), false},
+		{"data capture cannot commit filesystem", dataScope, tmpl(dataScope, filesystemScope), true},
+		{"filesystem capture cannot commit full", filesystemScope, tmpl(filesystemScope, fullScope), true},
+		{"filesystem capture commits filesystem", filesystemScope, tmpl(filesystemScope, filesystemScope), false},
+		{"filesystem capture commits data via conversion", filesystemScope, tmpl(filesystemScope, dataScope), false},
+		{"full capture commits filesystem via conversion", fullScope, tmpl(fullScope, filesystemScope), false},
 		// Actors paused before content_scope existed fall back to the
 		// template's onPause.
 		{"unset capture falls back to onPause", ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED, tmpl(dataScope, fullScope), true},

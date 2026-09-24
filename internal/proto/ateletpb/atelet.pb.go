@@ -2661,9 +2661,16 @@ func (*RestoreRequest_LocalConfig) isRestoreRequest_Config() {}
 func (*RestoreRequest_ExternalConfig) isRestoreRequest_Config() {}
 
 type RestoreResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// restored_via_filesystem_fallback is true when a Full restore's memory
+	// restore failed (e.g. an incompatible CPU feature set, a restore-spec
+	// validation change, or an old image) and atelet fell back to a cold boot
+	// from the snapshot's filesystem image instead of failing the actor. Always
+	// false for a restore that was not scope Full, and for a Full restore that
+	// succeeded normally or that carried no filesystem image to fall back to.
+	RestoredViaFilesystemFallback bool `protobuf:"varint,1,opt,name=restored_via_filesystem_fallback,json=restoredViaFilesystemFallback,proto3" json:"restored_via_filesystem_fallback,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
 }
 
 func (x *RestoreResponse) Reset() {
@@ -2694,6 +2701,13 @@ func (x *RestoreResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RestoreResponse.ProtoReflect.Descriptor instead.
 func (*RestoreResponse) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *RestoreResponse) GetRestoredViaFilesystemFallback() bool {
+	if x != nil {
+		return x.RestoredViaFilesystemFallback
+	}
+	return false
 }
 
 var File_atelet_proto protoreflect.FileDescriptor
@@ -2881,8 +2895,9 @@ const file_atelet_proto_rawDesc = "" +
 	"\tcpu_milli\x18\x0e \x01(\x03R\bcpuMilli\x12!\n" +
 	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytesB\b\n" +
 	"\x06configB\x11\n" +
-	"\x0f_egress_gateway\"\x11\n" +
-	"\x0fRestoreResponse*\x9a\x01\n" +
+	"\x0f_egress_gateway\"Z\n" +
+	"\x0fRestoreResponse\x12G\n" +
+	" restored_via_filesystem_fallback\x18\x01 \x01(\bR\x1drestoredViaFilesystemFallback*\x9a\x01\n" +
 	"\x12ActorMetadataField\x12$\n" +
 	" ACTOR_METADATA_FIELD_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ACTOR_METADATA_FIELD_NAME\x10\x01\x12!\n" +
