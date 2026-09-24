@@ -166,7 +166,7 @@ message ExternalSnapshot {
   //
   // +k8s:optional
   // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+  // +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
   SnapshotContentScope content_scope = 2;
 
   // UID of the ActorTemplate whose sandbox this snapshot's guest state was
@@ -201,7 +201,7 @@ message LocalSnapshotInfo {
   //
   // +k8s:optional
   // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+  // +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
   SnapshotContentScope content_scope = 3;
 }
 
@@ -212,6 +212,13 @@ enum SnapshotContentScope {
   SNAPSHOT_CONTENT_SCOPE_FULL = 1;
   // Captures durable data without process memory or root filesystem changes.
   SNAPSHOT_CONTENT_SCOPE_DATA = 2;
+  // Captures root filesystem changes and durable data, without process
+  // memory. Resuming an actor from a snapshot of this scope is a cold boot
+  // of its containers from the image with that filesystem restored, rather
+  // than a memory restore -- portable across worker CPU/machine families.
+  // gVisor sandboxes only today; rejected for micro-VM ActorTemplates (see
+  // ValidateCustom_ActorTemplate).
+  SNAPSHOT_CONTENT_SCOPE_FILESYSTEM = 3;
   // Keep this in sync with the maximums on fields of this type.
 }
 
@@ -754,6 +761,7 @@ enum SandboxClass {
   // Keep this in sync with SandboxConfig.sandbox_class's maximum.
 }
 
+// +k8s:customValidation # snapshot_config.{on_pause,on_commit} FILESYSTEM requires sandbox_config gVisor
 message ActorTemplate {
   // Common resource metadata: atespace, name, uid, version, timestamps.
   //
@@ -865,17 +873,18 @@ message SnapshotConfig {
   //
   // +k8s:required
   // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+  // +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
   SnapshotContentScope on_pause = 1;
 
   // on_commit defines the scope of the actor snapshot captured when an actor
   // is suspended.
-  // Must be a subset of on_pause: FULL allows FULL or DATA, DATA allows DATA.
+  // Must be contained in on_pause, per FULL ⊇ FILESYSTEM ⊇ DATA: FULL allows
+  // any scope, FILESYSTEM allows FILESYSTEM or DATA, DATA allows only DATA.
   // Defaults to FULL when unset.
   //
   // +k8s:required
   // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+  // +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
   SnapshotContentScope on_commit = 2;
 
   // on_resume selects, per snapshot situation, what supplies the guest state

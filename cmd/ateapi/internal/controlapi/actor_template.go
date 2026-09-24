@@ -340,13 +340,59 @@ func ValidateCustom_SnapshotConfig_StorageLocation(_ context.Context, _ operatio
 	return nil
 }
 
-// ValidateCustom_SnapshotConfig requires on_commit to be a subset of on_pause.
+// snapshotContentScopeRank orders SnapshotContentScope by how much content it
+// captures. The wire values (FULL=1, DATA=2, FILESYSTEM=3) are not in
+// containment order -- FULL ⊇ FILESYSTEM ⊇ DATA -- so on_commit ⊆ on_pause
+// must compare ranks, not the raw enum values. ok is false for UNSPECIFIED
+// and any value outside the enum: required/minimum/maximum tags reject those
+// independently, and comparing a rank against a meaningless value would only
+// add a confusing second error.
+func snapshotContentScopeRank(s ateapipb.SnapshotContentScope) (rank int, ok bool) {
+	switch s {
+	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL:
+		return 3, true
+	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM:
+		return 2, true
+	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA:
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
+// ValidateCustom_SnapshotConfig requires on_commit to be contained in
+// on_pause, per FULL ⊇ FILESYSTEM ⊇ DATA.
 func ValidateCustom_SnapshotConfig(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.SnapshotConfig) field.ErrorList {
-	if value.GetOnPause() == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA &&
-		value.GetOnCommit() != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA {
-		return field.ErrorList{field.Invalid(fldPath.Child("on_commit"), value.GetOnCommit().String(), "must be a subset of on_pause")}
+	pauseRank, pauseOK := snapshotContentScopeRank(value.GetOnPause())
+	commitRank, commitOK := snapshotContentScopeRank(value.GetOnCommit())
+	if !pauseOK || !commitOK {
+		return nil
+	}
+	if commitRank > pauseRank {
+		return field.ErrorList{field.Invalid(fldPath.Child("on_commit"), value.GetOnCommit().String(), "must be contained in on_pause (FULL ⊇ FILESYSTEM ⊇ DATA)")}
 	}
 	return nil
+}
+
+// ValidateCustom_ActorTemplate rejects the FILESYSTEM snapshot content scope
+// on a micro-VM ActorTemplate. gVisor is the only sandbox class with a
+// filesystem-only checkpoint/restore path (runsc fscheckpoint /
+// -fs-restore-image-path) today; a micro-VM's FULL snapshot already ships a
+// rootfs-upper.tar; teaching it to serve that as its own FILESYSTEM scope is
+// future work, not required for this change.
+func ValidateCustom_ActorTemplate(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.ActorTemplate) field.ErrorList {
+	if value.GetSandboxConfig().GetSandboxClass() != ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM {
+		return nil
+	}
+	const reason = "FILESYSTEM snapshot scope is gVisor-only; not supported for micro-VM sandbox_config"
+	var errs field.ErrorList
+	if value.GetSnapshotConfig().GetOnPause() == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM {
+		errs = append(errs, field.Invalid(fldPath.Child("snapshot_config", "on_pause"), value.GetSnapshotConfig().GetOnPause().String(), reason))
+	}
+	if value.GetSnapshotConfig().GetOnCommit() == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM {
+		errs = append(errs, field.Invalid(fldPath.Child("snapshot_config", "on_commit"), value.GetSnapshotConfig().GetOnCommit().String(), reason))
+	}
+	return errs
 }
 
 // envVarNameRE constrains env var names to any printable ASCII character

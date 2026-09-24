@@ -45,7 +45,14 @@ const (
 	// Captures process memory, root filesystem changes, and durable data.
 	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL SnapshotContentScope = 1
 	// Captures durable data without process memory or root filesystem changes.
-	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA SnapshotContentScope = 2 // Keep this in sync with the maximums on fields of this type.
+	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA SnapshotContentScope = 2
+	// Captures root filesystem changes and durable data, without process
+	// memory. Resuming an actor from a snapshot of this scope is a cold boot
+	// of its containers from the image with that filesystem restored, rather
+	// than a memory restore -- portable across worker CPU/machine families.
+	// gVisor sandboxes only today; rejected for micro-VM ActorTemplates (see
+	// ValidateCustom_ActorTemplate).
+	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FILESYSTEM SnapshotContentScope = 3 // Keep this in sync with the maximums on fields of this type.
 )
 
 // Enum value maps for SnapshotContentScope.
@@ -54,11 +61,13 @@ var (
 		0: "SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED",
 		1: "SNAPSHOT_CONTENT_SCOPE_FULL",
 		2: "SNAPSHOT_CONTENT_SCOPE_DATA",
+		3: "SNAPSHOT_CONTENT_SCOPE_FILESYSTEM",
 	}
 	SnapshotContentScope_value = map[string]int32{
 		"SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED": 0,
 		"SNAPSHOT_CONTENT_SCOPE_FULL":        1,
 		"SNAPSHOT_CONTENT_SCOPE_DATA":        2,
+		"SNAPSHOT_CONTENT_SCOPE_FILESYSTEM":  3,
 	}
 )
 
@@ -540,7 +549,7 @@ type ExternalSnapshot struct {
 	//
 	// +k8s:optional
 	// +k8s:minimum=1
-	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+	// +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
 	ContentScope SnapshotContentScope `protobuf:"varint,2,opt,name=content_scope,json=contentScope,proto3,enum=ateapi.SnapshotContentScope" json:"content_scope,omitempty"`
 	// UID of the ActorTemplate whose sandbox this snapshot's guest state was
 	// captured from.
@@ -626,7 +635,7 @@ type LocalSnapshotInfo struct {
 	//
 	// +k8s:optional
 	// +k8s:minimum=1
-	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+	// +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
 	ContentScope  SnapshotContentScope `protobuf:"varint,3,opt,name=content_scope,json=contentScope,proto3,enum=ateapi.SnapshotContentScope" json:"content_scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2039,6 +2048,7 @@ func (x *ObjectRef) GetName() string {
 	return ""
 }
 
+// +k8s:customValidation # snapshot_config.{on_pause,on_commit} FILESYSTEM requires sandbox_config gVisor
 type ActorTemplate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Common resource metadata: atespace, name, uid, version, timestamps.
@@ -2457,16 +2467,17 @@ type SnapshotConfig struct {
 	//
 	// +k8s:required
 	// +k8s:minimum=1
-	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+	// +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
 	OnPause SnapshotContentScope `protobuf:"varint,1,opt,name=on_pause,json=onPause,proto3,enum=ateapi.SnapshotContentScope" json:"on_pause,omitempty"`
 	// on_commit defines the scope of the actor snapshot captured when an actor
 	// is suspended.
-	// Must be a subset of on_pause: FULL allows FULL or DATA, DATA allows DATA.
+	// Must be contained in on_pause, per FULL ⊇ FILESYSTEM ⊇ DATA: FULL allows
+	// any scope, FILESYSTEM allows FILESYSTEM or DATA, DATA allows only DATA.
 	// Defaults to FULL when unset.
 	//
 	// +k8s:required
 	// +k8s:minimum=1
-	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+	// +k8s:maximum=3 # keep this in sync with the SnapshotContentScope enum
 	OnCommit SnapshotContentScope `protobuf:"varint,2,opt,name=on_commit,json=onCommit,proto3,enum=ateapi.SnapshotContentScope" json:"on_commit,omitempty"`
 	// on_resume selects, per snapshot situation, what supplies the guest state
 	// at resume. Defaults to the per-field defaults documented on
@@ -7528,11 +7539,12 @@ const file_ateapi_proto_rawDesc = "" +
 	"\tactor_uid\x18\x02 \x01(\tR\bactorUid\x12>\n" +
 	"\x1bcertificate_signing_request\x18\x03 \x01(\fR\x19certificateSigningRequest\"R\n" +
 	"!MintAteomActorCertificateResponse\x12-\n" +
-	"\x12actor_certificates\x18\x01 \x03(\fR\x11actorCertificates*\x80\x01\n" +
+	"\x12actor_certificates\x18\x01 \x03(\fR\x11actorCertificates*\xa7\x01\n" +
 	"\x14SnapshotContentScope\x12&\n" +
 	"\"SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bSNAPSHOT_CONTENT_SCOPE_FULL\x10\x01\x12\x1f\n" +
-	"\x1bSNAPSHOT_CONTENT_SCOPE_DATA\x10\x02*V\n" +
+	"\x1bSNAPSHOT_CONTENT_SCOPE_DATA\x10\x02\x12%\n" +
+	"!SNAPSHOT_CONTENT_SCOPE_FILESYSTEM\x10\x03*V\n" +
 	"\bTagScope\x12\x19\n" +
 	"\x15TAG_SCOPE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12TAG_SCOPE_ATESPACE\x10\x01\x12\x17\n" +

@@ -50,9 +50,15 @@ const (
 	// Restore-only: restore the ActorTemplate's golden snapshot's guest state
 	// (memory + full filesystem delta) combined with the snapshot's durable
 	// data. Never valid for CheckpointWorkload — snapshots only ever capture
-	// FULL or DATA; the control plane selects this scope at restore per the
-	// template's onResume configuration.
+	// FULL, FILESYSTEM, or DATA; the control plane selects this scope at
+	// restore per the template's onResume configuration.
 	SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN SnapshotScope = 3
+	// Capture the full filesystem delta on top of the OCI image (including any
+	// attached DurableDir volumes), without process memory. RestoreWorkload
+	// handles this scope as a cold boot: create the containers with a
+	// filesystem checkpoint to restore and start them normally, rather than
+	// `runsc restore`. gVisor only.
+	SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM SnapshotScope = 4
 )
 
 // Enum value maps for SnapshotScope.
@@ -62,12 +68,14 @@ var (
 		1: "SNAPSHOT_SCOPE_FULL",
 		2: "SNAPSHOT_SCOPE_DATA",
 		3: "SNAPSHOT_SCOPE_DATA_ON_GOLDEN",
+		4: "SNAPSHOT_SCOPE_FILESYSTEM",
 	}
 	SnapshotScope_value = map[string]int32{
 		"SNAPSHOT_SCOPE_UNSPECIFIED":    0,
 		"SNAPSHOT_SCOPE_FULL":           1,
 		"SNAPSHOT_SCOPE_DATA":           2,
 		"SNAPSHOT_SCOPE_DATA_ON_GOLDEN": 3,
+		"SNAPSHOT_SCOPE_FILESYSTEM":     4,
 	}
 )
 
@@ -1913,12 +1921,13 @@ const file_ateom_proto_rawDesc = "" +
 	"\x06sample\x18\x01 \x01(\v2\x1a.ateom.WorkloadStatsSampleR\x06sample\"\x1f\n" +
 	"\x1dGetActiveWorkloadStatsRequest\"V\n" +
 	"\x1eGetActiveWorkloadStatsResponse\x124\n" +
-	"\asamples\x18\x01 \x03(\v2\x1a.ateom.WorkloadStatsSampleR\asamples*\x84\x01\n" +
+	"\asamples\x18\x01 \x03(\v2\x1a.ateom.WorkloadStatsSampleR\asamples*\xa3\x01\n" +
 	"\rSnapshotScope\x12\x1e\n" +
 	"\x1aSNAPSHOT_SCOPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_FULL\x10\x01\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_DATA\x10\x02\x12!\n" +
-	"\x1dSNAPSHOT_SCOPE_DATA_ON_GOLDEN\x10\x03*b\n" +
+	"\x1dSNAPSHOT_SCOPE_DATA_ON_GOLDEN\x10\x03\x12\x1d\n" +
+	"\x19SNAPSHOT_SCOPE_FILESYSTEM\x10\x04*b\n" +
 	"\fSandboxClass\x12\x1d\n" +
 	"\x19SANDBOX_CLASS_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14SANDBOX_CLASS_GVISOR\x10\x01\x12\x19\n" +
