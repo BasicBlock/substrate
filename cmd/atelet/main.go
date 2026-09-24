@@ -26,7 +26,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -53,6 +55,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/substratex509"
 	"github.com/agent-substrate/substrate/internal/version"
 	"github.com/agent-substrate/substrate/internal/volume"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
 	"github.com/agent-substrate/substrate/pkg/client/informers/externalversions"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
@@ -787,6 +790,8 @@ func toAteomSnapshotScope(scope ateletpb.SnapshotScope) ateompb.SnapshotScope {
 	switch scope {
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		return ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA
+	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM:
+		return ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM
 	default:
 		return ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL
 	}
@@ -812,7 +817,10 @@ func (s *AteomHerder) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Che
 		return fmt.Errorf("while creating local checkpoint directory: %w", err)
 	}
 
-	// Move exactly the files ateom reported.
+	// Move exactly the files ateom reported. A gVisor Full capture's
+	// filesystem image nests under ateletpath.GVisorFSCheckpointDir, so
+	// fileName may itself be a relative path; create its parent before the
+	// rename.
 	for _, fileName := range rec.SnapshotFiles {
 		src := filepath.Join(checkpointDir, fileName)
 		dst := filepath.Join(localDir, fileName)
@@ -825,6 +833,12 @@ func (s *AteomHerder) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Che
 		}
 		recordSnapshotSize(ctx, fileName, allocatedBytes(info), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
 
+		// A gVisor Full capture's filesystem image nests under
+		// ateletpath.GVisorFSCheckpointDir, so fileName may itself be a
+		// relative path; create its parent before the rename.
+		if err := root.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return fmt.Errorf("while creating parent directory for %s: %w", dst, err)
+		}
 		if err := root.Rename(src, dst); err != nil {
 			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
 		}
@@ -1013,16 +1027,31 @@ func (s *AteomHerder) uploadLocalCheckpointDir(ctx context.Context, req *ateletp
 	}
 	desiredScope := ateattr.SnapshotScopeValue(req.GetDesiredScope())
 
+	capturedRank, capturedOK := wireScopeRank(capturedScope)
+	desiredRank, desiredOK := wireScopeRank(desiredScope)
 	switch {
 	case capturedScope == desiredScope:
-	case capturedScope == ateattr.SnapshotScopeData && desiredScope == ateattr.SnapshotScopeFull:
+	case !capturedOK || !desiredOK:
+		return rec.SandboxClass, status.Errorf(codes.FailedPrecondition, "local snapshot %q has an unrecognized scope (captured %q, desired %q)", req.GetLocalSnapshotName(), capturedScope, desiredScope)
+	case desiredRank > capturedRank:
 		// The control plane rejects this before marking SUSPENDING; reaching
 		// it here means the template changed mid-flight or store state drifted.
-		return rec.SandboxClass, apierror.FailedPrecondition("pause snapshot captured %s; cannot upload it as %s (memory was never captured)", capturedScope, desiredScope)
-	default: // captured FULL, DATA wanted
+		return rec.SandboxClass, apierror.FailedPrecondition("pause snapshot captured %s; cannot upload it as %s (content was never captured)", capturedScope, desiredScope)
+	case desiredScope == ateattr.SnapshotScopeData:
+		// DATA is the narrowest scope: a Full or Filesystem capture always
+		// narrows to it by keeping only the durable-dir tar.
 		if err := narrowFullCaptureToData(rec); err != nil {
 			return rec.SandboxClass, err
 		}
+	case desiredScope == ateattr.SnapshotScopeFilesystem:
+		// The equal-scope and desired-broader-than-captured cases were
+		// handled above, so reaching here with desired Filesystem means
+		// captured must outrank it -- i.e. captured is Full.
+		if err := narrowFullCaptureToFilesystem(rec); err != nil {
+			return rec.SandboxClass, err
+		}
+	default:
+		return rec.SandboxClass, status.Errorf(codes.FailedPrecondition, "pause snapshot captured %s; cannot upload it as %s", capturedScope, desiredScope)
 	}
 
 	return rec.SandboxClass, s.uploadSnapshot(ctx, uri, localDir, rec, req.GetActorTemplateAtespace(), req.GetActorTemplateName())
@@ -1037,6 +1066,22 @@ func readSnapshotManifest(dir string) ([]byte, error) {
 	return root.ReadFile(sandboxManifestName)
 }
 
+// wireScopeRank orders the ateattr scope labels by how much content they
+// capture, mirroring controlapi's snapshotContentScopeRank on the API side:
+// FULL ⊇ FILESYSTEM ⊇ DATA. ok is false for an unrecognized label.
+func wireScopeRank(scope string) (rank int, ok bool) {
+	switch scope {
+	case ateattr.SnapshotScopeFull:
+		return 3, true
+	case ateattr.SnapshotScopeFilesystem:
+		return 2, true
+	case ateattr.SnapshotScopeData:
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
 // narrowFullCaptureToData rewrites rec so a FULL capture uploads as a DATA
 // snapshot holding only the data-scope files ateom reported at checkpoint.
 func narrowFullCaptureToData(rec *sandboxAssetsRecord) error {
@@ -1047,6 +1092,37 @@ func narrowFullCaptureToData(rec *sandboxAssetsRecord) error {
 	}
 	rec.SnapshotFiles = rec.DataSnapshotFiles
 	rec.Scope = ateattr.SnapshotScopeData
+	return nil
+}
+
+// narrowFullCaptureToFilesystem rewrites rec so a gVisor Full capture uploads
+// as a FILESYSTEM snapshot: keep the durable-dir tar and the filesystem
+// image's own files (under ateletpath.GVisorFSCheckpointDir), drop the memory
+// checkpoint's top-level files. gVisor only -- FILESYSTEM is rejected for
+// micro-VM ActorTemplates at admission, so this should never be reached for
+// one, but a stale manifest from before that validation existed is still
+// handled explicitly rather than silently mis-narrowed.
+func narrowFullCaptureToFilesystem(rec *sandboxAssetsRecord) error {
+	if atev1alpha1.SandboxClass(rec.SandboxClass) != atev1alpha1.SandboxClassGvisor {
+		return apierror.FailedPrecondition("FILESYSTEM snapshot scope is gVisor-only; sandbox class %q cannot narrow a full capture to it", rec.SandboxClass)
+	}
+	fsPrefix := ateletpath.GVisorFSCheckpointDir + "/"
+	var kept []string
+	hasFSImage := false
+	for _, f := range rec.SnapshotFiles {
+		switch {
+		case f == ateletpath.DurableDirTarFile:
+			kept = append(kept, f)
+		case strings.HasPrefix(f, fsPrefix):
+			kept = append(kept, f)
+			hasFSImage = true
+		}
+	}
+	if !hasFSImage {
+		return apierror.FailedPrecondition("full %s capture has no filesystem image (%s); it predates FILESYSTEM-scope support and must be recaptured", rec.SandboxClass, ateletpath.GVisorFSCheckpointDir)
+	}
+	rec.SnapshotFiles = kept
+	rec.Scope = ateattr.SnapshotScopeFilesystem
 	return nil
 }
 
@@ -1254,27 +1330,66 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	actorDirs := ateletpath.ActorDirs(actorUID)
 	actorDirs.RestoreDir = checkpointDir
 
+	// restoreWorkloadRequest builds the ateom RestoreWorkload request for the
+	// given scope, so the Full attempt and its Filesystem fallback (below)
+	// send an identical request but for that one field.
+	restoreWorkloadRequest := func(scope ateompb.SnapshotScope) *ateompb.RestoreWorkloadRequest {
+		return &ateompb.RestoreWorkloadRequest{
+			Atespace:              actorRef.Atespace,
+			ActorName:             actorRef.Name,
+			ActorTemplateAtespace: req.GetActorTemplateAtespace(),
+			ActorTemplateName:     req.GetActorTemplateName(),
+			RunscPath:             runscPathFor(assetPaths),
+			RuntimeAssetPaths:     assetPaths,
+			Spec:                  spec,
+			Scope:                 scope,
+			ActorUid:              req.GetActorUid(),
+			ActorDirs:             actorDirs,
+			PreserveRestoreDir:    directLocal,
+			EgressGateway:         toAteomEgressGateway(req.GetEgressGateway()),
+			CpuMilli:              req.GetCpuMilli(),
+			MemoryBytes:           req.GetMemoryBytes(),
+			CpuFeatures:           runtimeRec.CPUFeatures,
+		}
+	}
+
 	// The ateom_restore phase is opaque from here; ateom logs its own breakdown of
 	// this call as "Actor restore phases".
 	tAteom := time.Now()
-	_, err = client.RestoreWorkload(ctx, &ateompb.RestoreWorkloadRequest{
-		Atespace:              actorRef.Atespace,
-		ActorName:             actorRef.Name,
-		ActorTemplateAtespace: req.GetActorTemplateAtespace(),
-		ActorTemplateName:     req.GetActorTemplateName(),
-		RunscPath:             runscPathFor(assetPaths),
-		RuntimeAssetPaths:     assetPaths,
-		Spec:                  spec,
-		Scope:                 toAteomSnapshotScope(req.GetScope()),
-		ActorUid:              req.GetActorUid(),
-		ActorDirs:             actorDirs,
-		PreserveRestoreDir:    directLocal,
-		EgressGateway:         toAteomEgressGateway(req.GetEgressGateway()),
-		CpuMilli:              req.GetCpuMilli(),
-		MemoryBytes:           req.GetMemoryBytes(),
-		CpuFeatures:           runtimeRec.CPUFeatures,
-	})
+	_, err = client.RestoreWorkload(ctx, restoreWorkloadRequest(toAteomSnapshotScope(req.GetScope())))
 	dAteom = time.Since(tAteom)
+	restoredViaFilesystemFallback := false
+	if err != nil && req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL && hasFilesystemImage(sandboxRec) {
+		// A Full restore's memory restore can fail for reasons no retry of the
+		// same request fixes: an incompatible CPU feature set across worker
+		// machine families, a restore-spec validation change, or an old
+		// image. The snapshot also carries a filesystem image (this atelet's
+		// Checkpoint captures one alongside every Full memory checkpoint), so
+		// fall back to a cold boot from it rather than crashing the actor.
+		// ateom's own failure cleanup (in RestoreWorkload's defer) has already
+		// returned it to "available"; the downloaded checkpoint files this
+		// attempt used are untouched, so the retry needs no re-download.
+		fullErr := err
+		slog.LogAttrs(ctx, slog.LevelWarn, "Full restore failed; snapshot has a filesystem image, falling back to a cold boot from it",
+			append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", fullErr))...)
+		tFallback := time.Now()
+		_, fallbackErr := client.RestoreWorkload(ctx, restoreWorkloadRequest(ateompb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM))
+		dAteom += time.Since(tFallback)
+		if fallbackErr != nil {
+			slog.LogAttrs(ctx, slog.LevelError, "Filesystem-image fallback restore also failed; crashing the actor",
+				append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("full_restore_err", fullErr), slog.Any("fallback_err", fallbackErr))...)
+			// Report the original Full failure: it is the actionable one
+			// (the fallback failing too usually means the node or the
+			// downloaded snapshot itself is broken, not the memory restore).
+		} else {
+			slog.LogAttrs(ctx, slog.LevelInfo, "Restored via filesystem-image fallback after a Full restore failure",
+				ateattr.ActorRefLogAttrs(actorRef)...)
+			op.scope = ateattr.SnapshotScopeFilesystem
+			op.fallback = ateattr.RestoreFallbackFilesystem
+			restoredViaFilesystemFallback = true
+			err = nil
+		}
+	}
 	if err != nil {
 		// TODO: classify the errors returned by Ateom and crash the actor if needed.
 		return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
@@ -1288,7 +1403,15 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, err
 	}
 
-	return &ateletpb.RestoreResponse{}, nil
+	return &ateletpb.RestoreResponse{RestoredViaFilesystemFallback: restoredViaFilesystemFallback}, nil
+}
+
+// hasFilesystemImage reports whether rec's snapshot files include a gVisor
+// filesystem checkpoint image (ateletpath.GVisorFSCheckpointDir), which lets a
+// failed Full restore fall back to a cold boot from it.
+func hasFilesystemImage(rec *sandboxAssetsRecord) bool {
+	prefix := ateletpath.GVisorFSCheckpointDir + "/"
+	return slices.ContainsFunc(rec.SnapshotFiles, func(f string) bool { return strings.HasPrefix(f, prefix) })
 }
 
 // Terminate terminates any running workload on ateom, unmounts external volumes,
@@ -1409,6 +1532,13 @@ func (s *AteomHerder) copyLocalCheckpoint(ctx context.Context, actorDir, snapsho
 		}
 		src := filepath.Join(srcDir, fileName)
 		dst := filepath.Join(dstDir, fileName)
+		// A gVisor Full capture's filesystem image nests under a
+		// subdirectory (ateletpath.GVisorFSCheckpointDir), so fileName may
+		// itself be a relative path; create its parent before linking (or
+		// copying) into it.
+		if err := root.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return fmt.Errorf("while creating parent directory for %s: %w", dst, err)
+		}
 		// A link to a symlink would be followed later, outside the root.
 		info, err := root.Lstat(src)
 		if err != nil {
@@ -1489,6 +1619,13 @@ func (s *AteomHerder) downloadExternalCheckpoint(ctx context.Context, snapshotUR
 			objectURI, err := uri.ObjectURI(fileName + ".zstd")
 			if err != nil {
 				return fmt.Errorf("while addressing %s in GCS: %w", fileName, err)
+			}
+			// A gVisor Full capture's filesystem image nests under a
+			// subdirectory (ateletpath.GVisorFSCheckpointDir), so fileName
+			// may itself be a relative path; create its parent before
+			// opening it.
+			if err := root.MkdirAll(filepath.Dir(fileName), 0o700); err != nil {
+				return fmt.Errorf("while creating parent directory for %s: %w", fileName, err)
 			}
 			local, err := root.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 			if err != nil {
@@ -1867,6 +2004,7 @@ func validateTerminateRequest(req *ateletpb.TerminateRequest) error {
 func validateSnapshotScope(scope ateletpb.SnapshotScope) error {
 	switch scope {
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+		ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM,
 		ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		return nil
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED:
@@ -1890,12 +2028,12 @@ func validateUploadPausedCheckpointRequest(req *ateletpb.UploadPausedCheckpointR
 	if _, err := resources.ParseSnapshotURI(req.GetDestinationSnapshotUri()); err != nil {
 		errs = append(errs, field.Invalid(field.NewPath("destination_snapshot_uri"), req.GetDestinationSnapshotUri(), err.Error()))
 	}
-	// Uploads only ever produce FULL or DATA snapshots.
+	// Uploads only ever produce FULL, FILESYSTEM, or DATA snapshots.
 	switch req.GetDesiredScope() {
-	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM, ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 	default:
 		errs = append(errs, field.NotSupported(field.NewPath("desired_scope"), req.GetDesiredScope(),
-			[]string{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL.String(), ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA.String()}))
+			[]string{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL.String(), ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FILESYSTEM.String(), ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA.String()}))
 	}
 	return errs.ToAggregate()
 }

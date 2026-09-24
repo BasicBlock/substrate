@@ -513,14 +513,20 @@ func unmarshalSandboxRecord(data []byte) (*sandboxAssetsRecord, error) {
 }
 
 // validateSnapshotFiles requires each name to be a distinct plain file name in
-// the checkpoint directory, other than the manifest atelet writes beside them.
-// Actual file access must still use os.Root so symlinks cannot escape that
-// directory.
+// the checkpoint directory, other than the manifest atelet writes beside them
+// -- or, for a gVisor Full capture's filesystem image, one level nested under
+// ateletpath.GVisorFSCheckpointDir (fs/<name>), alongside the memory
+// checkpoint's own top-level files. Actual file access must still use os.Root
+// so symlinks cannot escape that directory.
 func validateSnapshotFiles(files []string) error {
 	seen := make(map[string]bool, len(files))
 	for i, name := range files {
+		base := name
+		if rest, ok := strings.CutPrefix(name, ateletpath.GVisorFSCheckpointDir+"/"); ok {
+			base = rest
+		}
 		switch {
-		case name != filepath.Base(name) || !filepath.IsLocal(name) || name == ".":
+		case base == "" || base != filepath.Base(base) || !filepath.IsLocal(name) || name == ".":
 			return fmt.Errorf("snapshotFiles[%d] %q is not a file name in the checkpoint directory", i, name)
 		case name == sandboxManifestName:
 			return fmt.Errorf("snapshotFiles[%d] %q is reserved for the snapshot manifest", i, name)
