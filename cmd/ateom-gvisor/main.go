@@ -80,7 +80,12 @@ var (
 	egressGatewayTrustBundle    = pflag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "Service DNS trust bundle for the remote egress gateway")
 	readinessListenAddress      = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
 	drainSuspendWait            = pflag.Duration("drain-suspend-wait", 5*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the running actors (each CheckpointWorkload ends its actor's session) before stopping them with SIGTERM instead. Bounded by workloadGracePeriod (30 minutes) regardless of this value, and comfortably inside the worker pod's own terminationGracePeriodSeconds (60 minutes, set by atecontroller). 0 stops them without waiting.")
-	maxActors                   = pflag.Int("max-actors", 1000, "How many actors this worker will host at once")
+	// One, not upstream's 1000: BasicBlock's WorkerPools size each worker pod
+	// (CPU, memory, swap share) for a single workspace, and atecontroller has
+	// no way to pass this flag, so a larger default would pack several
+	// workspaces into one pod's limits. Kept so a pool built for sharing can
+	// raise it.
+	maxActors = pflag.Int("max-actors", 1, "How many actors this worker will host at once")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
