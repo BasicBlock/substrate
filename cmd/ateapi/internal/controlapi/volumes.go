@@ -58,7 +58,8 @@ func initialActorVolumes(ctx context.Context, scLister storagev1listers.StorageC
 // createActorVolumes provisions external volumes specified in volumesToCreate using the provided volume plugin.
 // It returns the list of external volumes (with updated status and storage IDs), or an error if any creation fails.
 // Any volumes processed before or during a failure are returned alongside the error so they can be persisted on the actor.
-func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLister storagev1listers.StorageClassLister, actorUID string, template *ateapipb.ActorTemplate, volumesToCreate []*ateapipb.ExternalVolume) (resultVolumes []*ateapipb.ExternalVolume, err error) {
+// accessibility, when not nil, names the topologies a driver's volume must be accessible from.
+func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLister storagev1listers.StorageClassLister, actorUID string, template *ateapipb.ActorTemplate, volumesToCreate []*ateapipb.ExternalVolume, accessibility func(driver string) ([]map[string]string, error)) (resultVolumes []*ateapipb.ExternalVolume, err error) {
 	resultVolumes = make([]*ateapipb.ExternalVolume, 0, len(volumesToCreate))
 
 	var currentIdx int
@@ -114,17 +115,25 @@ func createActorVolumes(ctx context.Context, registry VolumePluginRegistry, scLi
 			return resultVolumes, status.Errorf(codes.FailedPrecondition, "failed to get volume plugin for driver %q (StorageClass %q): %v", sc.Provisioner, scName, err)
 		}
 
-		storageVolumeID, volCtx, volErr := plugin.CreateVolume(ctx, actVolID, specVol.GetExternalVolumeTemplate().GetCapacity(), sc.Provisioner, sc.Parameters)
+		var requisite []map[string]string
+		if accessibility != nil {
+			if requisite, err = accessibility(sc.Provisioner); err != nil {
+				return resultVolumes, status.Errorf(codes.Unavailable, "while placing volume %q: %v", volName, err)
+			}
+		}
+
+		storageVolumeID, volCtx, topology, volErr := plugin.CreateVolume(ctx, actVolID, specVol.GetExternalVolumeTemplate().GetCapacity(), sc.Provisioner, sc.Parameters, requisite)
 		if volErr != nil {
 			return resultVolumes, status.Errorf(codes.Internal, "failed to create volume %q: %v", specVol.GetName(), volErr)
 		}
 
 		resultVolumes = append(resultVolumes, &ateapipb.ExternalVolume{
-			VolumeName:      volName,
-			StorageVolumeId: storageVolumeID,
-			VolumeType:      sc.Provisioner,
-			Status:          ateapipb.ExternalVolume_STATUS_CREATED,
-			VolumeContext:   volCtx,
+			VolumeName:         volName,
+			StorageVolumeId:    storageVolumeID,
+			VolumeType:         sc.Provisioner,
+			Status:             ateapipb.ExternalVolume_STATUS_CREATED,
+			VolumeContext:      volCtx,
+			AccessibleTopology: topologiesProto(topology),
 		})
 	}
 	return resultVolumes, nil
@@ -195,25 +204,12 @@ func actorVolumeID(actorUID string, volumeName string) string {
 
 // detachActorVolumes detaches all mounted external volumes for an actor from its worker node.
 func detachActorVolumes(ctx context.Context, st detachActorVolumesStore, registry VolumePluginRegistry, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, action string) error {
-	assignment := actor.GetStatus().GetWorkerAssignment()
-	if assignment == nil {
-		slog.WarnContext(ctx, fmt.Sprintf("Actor has no assigned worker pod during %s, skipping detach volumes", action), slog.String("actor_id", actor.GetMetadata().GetName()))
-		return nil
-	}
-
-	worker, err := st.GetWorker(ctx, assignment.GetWorker().GetName())
+	// A volume records the node it was attached to, which outlives the worker
+	// assignment; the assignment's node covers volumes attached before that
+	// was recorded.
+	assignedNode, err := assignedWorkerNode(ctx, st, actor)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			slog.WarnContext(ctx, fmt.Sprintf("Worker not found in store during %s, skipping detach volumes", action), slog.String("actor_id", actor.GetMetadata().GetName()))
-			return nil
-		}
-		return fmt.Errorf("failed to get worker: %w", err)
-	}
-
-	node := worker.GetNodeName()
-	if node == "" {
-		slog.WarnContext(ctx, fmt.Sprintf("Worker has no assigned node name during %s, skipping detach volumes", action), slog.String("actor_id", actor.GetMetadata().GetName()))
-		return nil
+		return err
 	}
 
 	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
@@ -232,6 +228,14 @@ func detachActorVolumes(ctx context.Context, st detachActorVolumesStore, registr
 		// Skip volumes that were never created (e.g. failed during PENDING state).
 		if vol.GetStorageVolumeId() == "" {
 			slog.WarnContext(ctx, "Volume has no storage volume ID, skipping detach", slog.String("volume_name", vol.GetVolumeName()), slog.String("actor_id", actor.GetMetadata().GetName()))
+			continue
+		}
+		node := vol.GetAttachedNode()
+		if node == "" {
+			node = assignedNode
+		}
+		if node == "" {
+			slog.WarnContext(ctx, fmt.Sprintf("Volume has no known node during %s, skipping detach", action), slog.String("volume_name", vol.GetVolumeName()), slog.String("actor_id", actor.GetMetadata().GetName()))
 			continue
 		}
 		slog.InfoContext(ctx, "Detaching volume from node", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", node))
@@ -255,4 +259,25 @@ func detachActorVolumes(ctx context.Context, st detachActorVolumesStore, registr
 // detach actor volumes.
 type detachActorVolumesStore interface {
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
+}
+
+// assignedWorkerNode returns the node of the actor's assigned worker: the
+// Worker record's, or the assignment's own record of it once the worker is
+// gone. Empty when the actor has no assignment.
+func assignedWorkerNode(ctx context.Context, st detachActorVolumesStore, actor *ateapipb.Actor) (string, error) {
+	assignment := actor.GetStatus().GetWorkerAssignment()
+	if assignment == nil {
+		return "", nil
+	}
+	worker, err := st.GetWorker(ctx, assignment.GetWorker().GetName())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return assignment.GetNodeName(), nil
+	case err != nil:
+		return "", fmt.Errorf("failed to get worker: %w", err)
+	case worker.GetNodeName() != "":
+		return worker.GetNodeName(), nil
+	default:
+		return assignment.GetNodeName(), nil
+	}
 }

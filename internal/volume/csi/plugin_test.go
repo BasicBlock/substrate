@@ -184,13 +184,54 @@ func TestPlugin_CreateVolume(t *testing.T) {
 	plugin := NewPlugin(client)
 
 	ctx := context.Background()
-	volID, _, err := plugin.CreateVolume(ctx, "test-vol", "1Gi", "standard", nil)
+	volID, _, topology, err := plugin.CreateVolume(ctx, "test-vol", "1Gi", "standard", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateVolume failed: %v", err)
 	}
 
 	if volID != "test-vol" {
 		t.Errorf("expected volume ID %q, got %q", "test-vol", volID)
+	}
+	if topology != nil {
+		t.Errorf("expected no topology from a driver that reports none, got %v", topology)
+	}
+}
+
+// TestPlugin_CreateVolumeTopology verifies the requested topologies reach the
+// driver as both requisite and preferred, and the driver's accessible
+// topology comes back.
+func TestPlugin_CreateVolumeTopology(t *testing.T) {
+	zoneA := map[string]string{"topology.gke.io/zone": "us-central1-a"}
+	zoneB := map[string]string{"topology.gke.io/zone": "us-central1-b"}
+	var got *csi.TopologyRequirement
+	driver := &mockCSIDriver{
+		createVolumeFunc: func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+			got = req.GetAccessibilityRequirements()
+			return &csi.CreateVolumeResponse{Volume: &csi.Volume{
+				VolumeId:           req.GetName(),
+				AccessibleTopology: []*csi.Topology{{Segments: zoneA}},
+			}}, nil
+		},
+	}
+	endpoint, cleanup := startMockCSIDriver(t, driver)
+	defer cleanup()
+	client, err := NewCSIClient(endpoint, nil)
+	if err != nil {
+		t.Fatalf("failed to create CSI client: %v", err)
+	}
+	defer client.Close()
+
+	_, _, topology, err := NewPlugin(client).CreateVolume(context.Background(), "test-vol", "1Gi", "standard", nil, []map[string]string{zoneA, zoneB})
+	if err != nil {
+		t.Fatalf("CreateVolume failed: %v", err)
+	}
+	for name, list := range map[string][]*csi.Topology{"requisite": got.GetRequisite(), "preferred": got.GetPreferred()} {
+		if len(list) != 2 || list[0].GetSegments()["topology.gke.io/zone"] != "us-central1-a" || list[1].GetSegments()["topology.gke.io/zone"] != "us-central1-b" {
+			t.Errorf("%s = %v, want zones a then b", name, list)
+		}
+	}
+	if len(topology) != 1 || topology[0]["topology.gke.io/zone"] != "us-central1-a" {
+		t.Errorf("topology = %v, want the driver's zone a", topology)
 	}
 }
 

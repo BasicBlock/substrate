@@ -80,10 +80,10 @@ func (p *Plugin) DriverName(ctx context.Context) (string, error) {
 }
 
 // CreateVolume maps to CSI Controller CreateVolume.
-func (p *Plugin) CreateVolume(ctx context.Context, name string, capacity string, driverName string, parameters map[string]string) (string, map[string]string, error) {
+func (p *Plugin) CreateVolume(ctx context.Context, name string, capacity string, driverName string, parameters map[string]string, accessibility []map[string]string) (string, map[string]string, []map[string]string, error) {
 	qty, err := resource.ParseQuantity(capacity)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to parse capacity %q: %w", capacity, err)
+		return "", nil, nil, fmt.Errorf("failed to parse capacity %q: %w", capacity, err)
 	}
 	capBytes := qty.Value()
 
@@ -95,17 +95,32 @@ func (p *Plugin) CreateVolume(ctx context.Context, name string, capacity string,
 		VolumeCapabilities: getStandardCapabilities(),
 		Parameters:         parameters,
 	}
+	if len(accessibility) > 0 {
+		// Requisite confines the volume to these topologies; Preferred, the
+		// same list in order, makes the driver pick the first it can.
+		topologies := make([]*csi.Topology, 0, len(accessibility))
+		for _, segments := range accessibility {
+			topologies = append(topologies, &csi.Topology{Segments: segments})
+		}
+		req.AccessibilityRequirements = &csi.TopologyRequirement{Requisite: topologies, Preferred: topologies}
+	}
 
 	resp, err := p.client.CreateVolume(ctx, req)
 	if err != nil {
-		return "", nil, fmt.Errorf("CSI CreateVolume failed: %w", err)
+		return "", nil, nil, fmt.Errorf("CSI CreateVolume failed: %w", err)
 	}
 
 	if resp.GetVolume() == nil {
-		return "", nil, fmt.Errorf("CSI CreateVolume response returned nil volume")
+		return "", nil, nil, fmt.Errorf("CSI CreateVolume response returned nil volume")
 	}
 
-	return resp.GetVolume().GetVolumeId(), resp.GetVolume().GetVolumeContext(), nil
+	var topology []map[string]string
+	for _, t := range resp.GetVolume().GetAccessibleTopology() {
+		if len(t.GetSegments()) > 0 {
+			topology = append(topology, t.GetSegments())
+		}
+	}
+	return resp.GetVolume().GetVolumeId(), resp.GetVolume().GetVolumeContext(), topology, nil
 }
 
 // DeleteVolume maps to CSI Controller DeleteVolume.

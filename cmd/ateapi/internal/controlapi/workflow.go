@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -111,6 +112,9 @@ type ActorWorkflow struct {
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
 	objectStore          objectstore.Store
+	// topology places volumes and the actors that mount them by zone; nil
+	// until RPCService.UseNodes, which leaves volumes unconstrained.
+	topology atomic.Pointer[nodeTopology]
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.
@@ -129,10 +133,9 @@ func NewActorWorkflow(
 	pluginRegistry VolumePluginRegistry,
 	objectStore objectstore.Store,
 ) *ActorWorkflow {
-	return &ActorWorkflow{
+	w := &ActorWorkflow{
 		store:                store,
 		workerCache:          workerCache,
-		scheduler:            scheduling.New(workerCache),
 		dialer:               dialer,
 		sandboxConfigLister:  sandboxConfigLister,
 		storageClassLister:   storageClassLister,
@@ -141,6 +144,17 @@ func NewActorWorkflow(
 		pluginRegistry:       pluginRegistry,
 		objectStore:          objectStore,
 	}
+	w.scheduler = scheduling.New(workerCache, scheduling.WithNodeLabels(w.nodeLabels))
+	return w
+}
+
+// nodeLabels returns a node's labels for the scheduler's volume placement.
+func (w *ActorWorkflow) nodeLabels(node string) (map[string]string, bool) {
+	topology := w.topology.Load()
+	if topology == nil {
+		return nil, false
+	}
+	return topology.labels(node)
 }
 
 // actorWorkflowStore enumerates the exact storage methods needed by
