@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/agent-substrate/substrate/internal/volume"
@@ -264,7 +266,7 @@ func TestCreateActorVolumes(t *testing.T) {
 					},
 				},
 			}
-			res, err := createActorVolumes(ctx, registry, scLister, "actor-uid-123", tt.tmpl, tt.inputVolumes)
+			res, err := createActorVolumes(ctx, registry, scLister, "actor-uid-123", tt.tmpl, tt.inputVolumes, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("createActorVolumes() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -272,6 +274,48 @@ func TestCreateActorVolumes(t *testing.T) {
 				t.Errorf("createActorVolumes() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestCreateActorVolumesInItsTopology verifies a volume is requested where
+// accessibility places its driver, records where it landed, and stays PENDING
+// when its placement cannot be resolved.
+func TestCreateActorVolumesInItsTopology(t *testing.T) {
+	ctx := context.Background()
+	zoneA := map[string]string{"topology.gke.io/zone": "us-central1-a"}
+	tmpl := &ateapipb.ActorTemplate{Volumes: []*ateapipb.Volume{{
+		Name:                   "data-vol",
+		ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{StorageClassName: "standard"},
+	}}}
+	pending := []*ateapipb.ExternalVolume{{VolumeName: "data-vol", VolumeType: "mock-standard", Status: ateapipb.ExternalVolume_STATUS_PENDING}}
+	registry := &mockPluginRegistry{plugins: map[string]volume.VolumePluginControlPlane{"mock-standard": volume.NewMockVolumePlugin()}}
+	scLister := &fakeStorageClassLister{storageClasses: map[string]*storagev1.StorageClass{
+		"standard": {ObjectMeta: metav1.ObjectMeta{Name: "standard"}, Provisioner: "mock-standard"},
+	}}
+
+	var askedFor []string
+	res, err := createActorVolumes(ctx, registry, scLister, "actor-uid-123", tmpl, pending, func(driver string) ([]map[string]string, error) {
+		askedFor = append(askedFor, driver)
+		return []map[string]string{zoneA}, nil
+	})
+	if err != nil {
+		t.Fatalf("createActorVolumes: %v", err)
+	}
+	if diff := cmp.Diff([]string{"mock-standard"}, askedFor); diff != "" {
+		t.Errorf("accessibility drivers mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]*ateapipb.Topology{{Segments: zoneA}}, res[0].GetAccessibleTopology(), protocmp.Transform()); diff != "" {
+		t.Errorf("recorded topology mismatch (-want +got):\n%s", diff)
+	}
+
+	res, err = createActorVolumes(ctx, registry, scLister, "actor-uid-123", tmpl, pending, func(string) ([]map[string]string, error) {
+		return nil, fmt.Errorf("node has no zone label")
+	})
+	if status.Code(err) != codes.Unavailable {
+		t.Errorf("createActorVolumes error = %v, want Unavailable", err)
+	}
+	if len(res) != 1 || res[0].GetStatus() != ateapipb.ExternalVolume_STATUS_PENDING {
+		t.Errorf("volumes = %v, want the volume left PENDING", res)
 	}
 }
 

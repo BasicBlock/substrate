@@ -21,7 +21,12 @@ import (
 // VolumePluginControlPlane abstracts storage operations performed on the control plane.
 type VolumePluginControlPlane interface {
 	DriverName(ctx context.Context) (string, error)
-	CreateVolume(ctx context.Context, name string, capacity string, driverName string, parameters map[string]string) (volumeID string, volumeContext map[string]string, err error)
+	// CreateVolume provisions a volume. accessibility, when non-empty, lists
+	// the topologies (segments such as {"topology.gke.io/zone":
+	// "us-central1-a"}) the volume must be accessible from, most preferred
+	// first. topology is where the storage system made it accessible: nil
+	// when every node can reach it.
+	CreateVolume(ctx context.Context, name string, capacity string, driverName string, parameters map[string]string, accessibility []map[string]string) (volumeID string, volumeContext map[string]string, topology []map[string]string, err error)
 	DeleteVolume(ctx context.Context, volumeID string) error
 	AttachVolume(ctx context.Context, volumeID string, node string) error
 	DetachVolume(ctx context.Context, volumeID string, node string) error

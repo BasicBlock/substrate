@@ -42,6 +42,12 @@ type Constraints struct {
 	// to specific node VMs.
 	RequiredNodes []string
 
+	// VolumeTopologies are where the actor's volumes can be reached: for each
+	// volume, the topologies (node label sets, e.g. a zone) it is accessible
+	// from. A worker qualifies only if its node's labels match one topology of
+	// every volume. Empty when every node can reach the actor's volumes.
+	VolumeTopologies [][]map[string]string
+
 	// Limits are the actor's declared resource limits, named as a Worker names
 	// the capacity it reports, so the two subtract.
 	Limits *ateapipb.Resources
@@ -76,6 +82,8 @@ type scheduler struct {
 	// intn returns a uniformly distributed random value in [0,n).
 	// Defaults to the global math/rand source
 	intn func(n int) int
+	// nodeLabels returns a node's labels, and false for an unknown node.
+	nodeLabels func(node string) (map[string]string, bool)
 }
 
 // Option configures the Scheduler returned by New.
@@ -85,6 +93,13 @@ type Option func(*scheduler)
 // workers. n is always >= 1.
 func WithIntn(intn func(n int) int) Option {
 	return func(s *scheduler) { s.intn = intn }
+}
+
+// WithNodeLabels lets the scheduler read the labels of a worker's node, which
+// placement by VolumeTopologies needs. Without it, constraints naming volume
+// topologies match no worker.
+func WithNodeLabels(nodeLabels func(node string) (map[string]string, bool)) Option {
+	return func(s *scheduler) { s.nodeLabels = nodeLabels }
 }
 
 // New returns a Scheduler placing onto workers reported by source.
@@ -134,7 +149,35 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 		return false
 	}
 
-	return len(constraints.RequiredNodes) == 0 || slices.Contains(constraints.RequiredNodes, worker.GetNodeName())
+	if len(constraints.RequiredNodes) > 0 && !slices.Contains(constraints.RequiredNodes, worker.GetNodeName()) {
+		return false
+	}
+	return s.reachesVolumes(worker.GetNodeName(), constraints.VolumeTopologies)
+}
+
+// reachesVolumes reports whether node matches one topology of every volume. A
+// node whose labels are unknown reaches none: placing an actor where its disk
+// cannot attach would only fail later, at attach.
+func (s *scheduler) reachesVolumes(node string, volumes [][]map[string]string) bool {
+	if len(volumes) == 0 {
+		return true
+	}
+	if s.nodeLabels == nil {
+		return false
+	}
+	nodeLabels, ok := s.nodeLabels(node)
+	if !ok {
+		return false
+	}
+	set := labels.Set(nodeLabels)
+	for _, topologies := range volumes {
+		if !slices.ContainsFunc(topologies, func(topology map[string]string) bool {
+			return len(topology) > 0 && labels.SelectorFromSet(topology).Matches(set)
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 // HasRoom reports whether what the worker has left admits one more actor of

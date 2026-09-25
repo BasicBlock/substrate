@@ -378,6 +378,38 @@ message ExternalVolume {
   // +k8s:eachKey=+k8s:maxLength=128
   // +k8s:eachVal=+k8s:maxLength=256
   map<string, string> volume_context = 5;
+
+  // The topologies the storage system made the volume accessible from, as its
+  // CSI driver reported them at creation: a zonal disk reports its zone. A
+  // worker can host the actor only if its node's labels match one of them.
+  // Empty for a volume every node can reach, and for volumes created before
+  // this was recorded. Set when provisioning completes.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=16
+  // +k8s:listType=atomic
+  repeated Topology accessible_topology = 6;
+
+  // The node the volume was last attached to. It outlives the worker
+  // assignment, which a crash or a lost worker clears without detaching, so a
+  // later resume or delete can still detach it there: a single-writer disk
+  // attaches nowhere else until it is. Empty until first attached.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=253
+  string attached_node = 7;
+}
+
+// Topology is one set of topology segments a volume is accessible from, e.g.
+// {"topology.gke.io/zone": "us-central1-a"}. Segments are the labels a CSI
+// driver's node plugin publishes on each node.
+message Topology {
+  // +k8s:required
+  // +k8s:minProperties=1
+  // +k8s:maxProperties=8
+  // +k8s:eachKey=+k8s:format=k8s-label-key
+  // +k8s:eachVal=+k8s:format=k8s-label-value
+  map<string, string> segments = 1;
 }
 
 message Actor {

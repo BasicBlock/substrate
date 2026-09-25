@@ -401,6 +401,48 @@ func withCapacity(cpuMilli, memBytes int64) func(*ateapipb.Worker) {
 // The two questions are separate because a caller re-validating a worker that
 // already holds the actor must not be told the placement is illegal just
 // because the actor it is asking about filled the worker up.
+// TestAppliesVolumeTopologies verifies a worker qualifies only when its node
+// matches one topology of every volume, and never when its node's labels are
+// unknown.
+func TestAppliesVolumeTopologies(t *testing.T) {
+	zone := func(z string) map[string]string { return map[string]string{"topology.gke.io/zone": z} }
+	nodes := map[string]map[string]string{
+		"node-a": {"topology.gke.io/zone": "us-central1-a", "kubernetes.io/hostname": "node-a"},
+		"node-b": {"topology.gke.io/zone": "us-central1-b"},
+	}
+	nodeLabels := func(node string) (map[string]string, bool) {
+		l, ok := nodes[node]
+		return l, ok
+	}
+	for _, tc := range []struct {
+		name    string
+		node    string
+		volumes [][]map[string]string
+		labels  func(string) (map[string]string, bool)
+		want    bool
+	}{
+		{"no volume topology", "node-unknown", nil, nil, true},
+		{"node in the volume's zone", "node-a", [][]map[string]string{{zone("us-central1-a")}}, nodeLabels, true},
+		{"node in another zone", "node-b", [][]map[string]string{{zone("us-central1-a")}}, nodeLabels, false},
+		{"one of the volume's topologies", "node-b", [][]map[string]string{{zone("us-central1-a"), zone("us-central1-b")}}, nodeLabels, true},
+		{"every volume must be reachable", "node-a", [][]map[string]string{{zone("us-central1-a")}, {zone("us-central1-b")}}, nodeLabels, false},
+		{"unknown node", "node-c", [][]map[string]string{{zone("us-central1-a")}}, nodeLabels, false},
+		{"no node labels to check", "node-a", [][]map[string]string{{zone("us-central1-a")}}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var opts []Option
+			if tc.labels != nil {
+				opts = append(opts, WithNodeLabels(tc.labels))
+			}
+			s := New(fleet{}, opts...)
+			got := s.Applies(worker("w", "gvisor", tc.node, nil), Constraints{SandboxClass: "gvisor", VolumeTopologies: tc.volumes})
+			if got != tc.want {
+				t.Errorf("Applies() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAppliesIgnoresRoom(t *testing.T) {
 	full := worker("w-full", "gvisor", "node-a", nil, withMaxActors(1), assigned("demo", "resident"))
 	constraints := Constraints{SandboxClass: "gvisor"}

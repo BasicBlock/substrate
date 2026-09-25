@@ -62,10 +62,11 @@ func (p *MockVolumePlugin) DriverName(ctx context.Context) (string, error) {
 }
 
 // CreateVolume simulates volume provisioning.
-func (p *MockVolumePlugin) CreateVolume(ctx context.Context, name string, capacity string, storageClass string, parameters map[string]string) (string, map[string]string, error) {
+// It is accessible wherever it was asked to be.
+func (p *MockVolumePlugin) CreateVolume(ctx context.Context, name string, capacity string, storageClass string, parameters map[string]string, accessibility []map[string]string) (string, map[string]string, []map[string]string, error) {
 	volumeID := "mock-vol-" + name
 	slog.InfoContext(ctx, "MockVolumePlugin.CreateVolume", slog.String("name", name), slog.String("capacity", capacity), slog.String("storageClass", storageClass), slog.String("volumeID", volumeID))
-	return volumeID, parameters, nil
+	return volumeID, parameters, accessibility, nil
 }
 
 // DeleteVolume simulates volume deletion.

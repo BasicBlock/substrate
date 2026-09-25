@@ -28,6 +28,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/volume/csi"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
 )
 
@@ -138,12 +139,16 @@ type serviceStore interface {
 	AcquireLease(ctx context.Context, key string) (*store.Lease, error)
 }
 
-// UseCSINodes lets attach and detach address nodes by the node ID each CSI
-// driver registered in the node's CSINode object (see csiNodePlugin).
-func (s *RPCService) UseCSINodes(nodes storagev1listers.CSINodeLister) {
+// UseNodes gives the service the node objects volumes need: CSINode
+// registrations, so attach and detach address nodes by the node ID each CSI
+// driver registered (see csiNodePlugin), and Nodes, whose labels place a
+// volume in its first worker's zone and keep the actor there (see
+// nodeTopology).
+func (s *RPCService) UseNodes(csiNodes storagev1listers.CSINodeLister, nodes corev1listers.NodeLister) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.csiNodeLister = nodes
+	s.csiNodeLister = csiNodes
+	s.mu.Unlock()
+	s.actorWorkflow.topology.Store(&nodeTopology{csiNodes: csiNodes, nodes: nodes})
 }
 
 // GetPlugin retrieves a CSI volume plugin by driver name, dynamically discovering it if not present.

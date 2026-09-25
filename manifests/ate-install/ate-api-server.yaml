@@ -22,6 +22,11 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
+- apiGroups: [""]
+  # nodes: a zonal volume is created in its worker's zone, read from the node's
+  # labels, and its actor placed only on nodes there.
+  resources: ["nodes"]
+  verbs: ["get", "watch", "list"]
 - apiGroups: ["ate.dev"]
   resources: ["workerpools", "sandboxconfigs", "csidriverconfigs"]
   verbs: ["get", "watch", "list"]

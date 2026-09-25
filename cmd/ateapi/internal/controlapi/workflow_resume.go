@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
@@ -121,9 +122,11 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 		return nil, false, err
 	}
 	actor = assigned
-	if err = w.ensureVolumesAttached(leaseCtx, actor, worker, actorTemplate); err != nil {
+	var attached *ateapipb.Actor
+	if attached, err = w.ensureVolumesAttached(leaseCtx, actorRef, actor, worker, actorTemplate); err != nil {
 		return nil, false, err
 	}
+	actor = attached
 	if tele, err = w.ensureAteletRestored(leaseCtx, actorRef, actor, actorTemplate, src); err != nil {
 		return nil, false, err
 	}
@@ -245,6 +248,10 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 // ensureVolumesCreated provisions any initial actor volumes that are in
 // PENDING state, persisting the resulting volume state (even when creation
 // partially failed, so progress is not lost) and returning the stored copy.
+// Each is made accessible from a node the actor can run on (volumeNode): a
+// zonal disk lands in that node's zone and records it, which then confines
+// the worker claim, and every later placement, to that zone
+// (schedulingConstraints).
 func (w *ActorWorkflow) ensureVolumesCreated(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "CreateVolumes")
 	defer func() { err = done(err) }()
@@ -261,7 +268,7 @@ func (w *ActorWorkflow) ensureVolumesCreated(ctx context.Context, actorRef resou
 		return actor, nil
 	}
 
-	volumes, createErr := createActorVolumes(ctx, w.pluginRegistry, w.storageClassLister, actor.GetMetadata().GetUid(), actorTemplate, actor.GetStatus().GetActorVolumes())
+	volumes, createErr := createActorVolumes(ctx, w.pluginRegistry, w.storageClassLister, actor.GetMetadata().GetUid(), actorTemplate, actor.GetStatus().GetActorVolumes(), w.volumeAccessibility(ctx, actor, actorTemplate))
 	// createActorVolumes reports the state it got to even when it fails, so both
 	// paths persist the same field.
 	updatePrecondition := store.PreconditionFrom(actor)
@@ -284,6 +291,50 @@ func (w *ActorWorkflow) ensureVolumesCreated(ctx context.Context, actorRef resou
 		return nil, fmt.Errorf("while updating actor after volume creation: %w", updateErr)
 	}
 	return storedActor, nil
+}
+
+// volumeAccessibility returns where a driver's new volume for actor must be
+// accessible from: the topology its node plugin registered on volumeNode. Nil
+// without node topology, which leaves every volume unconstrained.
+func (w *ActorWorkflow) volumeAccessibility(ctx context.Context, actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) func(driver string) ([]map[string]string, error) {
+	topology := w.topology.Load()
+	if topology == nil {
+		return nil
+	}
+	var node string
+	return func(driver string) ([]map[string]string, error) {
+		if node == "" {
+			var err error
+			if node, err = w.volumeNode(ctx, actor, tmpl); err != nil {
+				return nil, err
+			}
+		}
+		segments, err := topology.driverSegments(driver, node)
+		if err != nil || segments == nil {
+			return nil, err
+		}
+		return []map[string]string{segments}, nil
+	}
+}
+
+// volumeNode is the node an actor's new volumes are made accessible from: its
+// worker's, when a previous attempt already claimed one, else that of a worker
+// it could be scheduled onto now. That worker is only a sample, claimed by no
+// one, but it proves the zone has room; the new volumes' zone then confines
+// the claim to it.
+func (w *ActorWorkflow) volumeNode(ctx context.Context, actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) (string, error) {
+	if node := actor.GetStatus().GetWorkerAssignment().GetNodeName(); node != "" {
+		return node, nil
+	}
+	constraints, err := schedulingConstraints(actor, tmpl)
+	if err != nil {
+		return "", err
+	}
+	worker, err := w.scheduler.Schedule(ctx, constraints)
+	if err != nil {
+		return "", fmt.Errorf("while choosing where the actor's volumes live: %w", err)
+	}
+	return worker.GetNodeName(), nil
 }
 
 // ensureWorkerAssigned leaves the actor RESUMING with a validated, live,
@@ -616,7 +667,9 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) 
 		SandboxClass:  sandboxClassString(tmpl.GetSandboxConfig().GetSandboxClass()),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes: actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(),
-		Limits:        limits.Proto(),
+		// A zonal volume attaches only to nodes in its zone.
+		VolumeTopologies: volumeTopologies(actor.GetStatus().GetActorVolumes()),
+		Limits:           limits.Proto(),
 	}
 	if sel := tmpl.GetWorkerSelector(); sel != nil {
 		c.TemplateSelector = labels.SelectorFromSet(labels.Set(sel.GetMatchLabels()))
@@ -625,30 +678,60 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) 
 }
 
 // ensureVolumesAttached attaches the actor's mounted external volumes to the
-// assigned worker's node. Attachment is idempotent, so a re-entered workflow
-// safely runs it again.
+// assigned worker's node, first detaching each from any other node it was
+// left attached to (a crash or a lost worker clears the assignment without
+// detaching, and a single-writer disk attaches nowhere else until it is), and
+// records the node on each volume. Attachment is idempotent, so a re-entered
+// workflow safely runs it again.
 // TODO replace re-execution with a proper check on the volumes' attach state.
-func (w *ActorWorkflow) ensureVolumesAttached(ctx context.Context, actor *ateapipb.Actor, worker *ateapipb.Worker, actorTemplate *ateapipb.ActorTemplate) (err error) {
+func (w *ActorWorkflow) ensureVolumesAttached(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, worker *ateapipb.Worker, actorTemplate *ateapipb.ActorTemplate) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "AttachVolumes")
 	defer func() { err = done(err) }()
 
 	node := worker.GetNodeName()
 	if node == "" {
-		return fmt.Errorf("assigned worker has no node name")
+		return nil, fmt.Errorf("assigned worker has no node name")
 	}
 
 	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
+	var newlyAttached []string
 	for _, vol := range getMountedActorVolumes(ctx, ref, actor.GetStatus().GetActorVolumes(), actorTemplate) {
-		slog.InfoContext(ctx, "Attaching volume to node", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", node))
 		plugin, err := w.pluginRegistry.GetPlugin(ctx, vol.GetVolumeType())
 		if err != nil {
-			return fmt.Errorf("failed to get volume plugin for %q: %w", vol.GetVolumeType(), err)
+			return nil, fmt.Errorf("failed to get volume plugin for %q: %w", vol.GetVolumeType(), err)
 		}
+		if stale := vol.GetAttachedNode(); stale != "" && stale != node {
+			slog.InfoContext(ctx, "Detaching volume from the node it was left on", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", stale))
+			if err := plugin.DetachVolume(ctx, vol.GetStorageVolumeId(), stale); err != nil && status.Code(err) != codes.NotFound {
+				return nil, fmt.Errorf("failed to detach volume %q from node %q: %w", vol.GetStorageVolumeId(), stale, err)
+			}
+		}
+		slog.InfoContext(ctx, "Attaching volume to node", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", node))
 		if err := plugin.AttachVolume(ctx, vol.GetStorageVolumeId(), node); err != nil {
-			return fmt.Errorf("failed to attach volume %q to node %q: %w", vol.GetStorageVolumeId(), node, err)
+			return nil, fmt.Errorf("failed to attach volume %q to node %q: %w", vol.GetStorageVolumeId(), node, err)
+		}
+		if vol.GetAttachedNode() != node {
+			newlyAttached = append(newlyAttached, vol.GetVolumeName())
 		}
 	}
-	return nil
+	if len(newlyAttached) == 0 {
+		return actor, nil
+	}
+	stored, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+		for _, vol := range toUpdate.GetStatus().GetActorVolumes() {
+			if slices.Contains(newlyAttached, vol.GetVolumeName()) {
+				vol.AttachedNode = node
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrVersionConflict) {
+			return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
+		}
+		return nil, fmt.Errorf("while recording the volumes' node: %w", err)
+	}
+	return stored, nil
 }
 
 // ensureAteletRestored brings the workload up on the assigned worker:
