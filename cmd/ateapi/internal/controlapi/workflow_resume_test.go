@@ -1081,6 +1081,10 @@ type capturingAtelet struct {
 	checkpointErr   error
 	uploadPausedErr error
 	uploadPaused    *ateletpb.UploadPausedCheckpointRequest
+	// reclaimErr, when set, is returned by ReclaimActor; reclaimed records
+	// the UIDs it was asked to reclaim.
+	reclaimErr error
+	reclaimed  []string
 }
 
 func (f *capturingAtelet) DropSnapshotMemory(ctx context.Context, req *ateletpb.DropSnapshotMemoryRequest) (*ateletpb.DropSnapshotMemoryResponse, error) {

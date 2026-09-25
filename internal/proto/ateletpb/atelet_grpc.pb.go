@@ -257,6 +257,7 @@ const (
 	AteomHerder_UploadPausedCheckpoint_FullMethodName = "/atelet.AteomHerder/UploadPausedCheckpoint"
 	AteomHerder_Terminate_FullMethodName              = "/atelet.AteomHerder/Terminate"
 	AteomHerder_DropSnapshotMemory_FullMethodName     = "/atelet.AteomHerder/DropSnapshotMemory"
+	AteomHerder_ReclaimActor_FullMethodName           = "/atelet.AteomHerder/ReclaimActor"
 )
 
 // AteomHerderClient is the client API for AteomHerder service.
@@ -294,6 +295,13 @@ type AteomHerderClient interface {
 	// predates FILESYSTEM-scope support). Idempotent: a snapshot already scoped
 	// Filesystem succeeds without rewriting anything.
 	DropSnapshotMemory(ctx context.Context, in *DropSnapshotMemoryRequest, opts ...grpc.CallOption) (*DropSnapshotMemoryResponse, error)
+	// ReclaimActor removes what an actor with no workload on this node left
+	// here: its pause snapshots and its directories. The control plane calls it
+	// when deleting an actor whose pause snapshot lives on this node, which
+	// Terminate never reaches (the actor has no worker to terminate). Refuses
+	// (FailedPrecondition) while an RPC for the actor is in flight or a
+	// workload of it runs on this node. Idempotent.
+	ReclaimActor(ctx context.Context, in *ReclaimActorRequest, opts ...grpc.CallOption) (*ReclaimActorResponse, error)
 }
 
 type ateomHerderClient struct {
@@ -364,6 +372,16 @@ func (c *ateomHerderClient) DropSnapshotMemory(ctx context.Context, in *DropSnap
 	return out, nil
 }
 
+func (c *ateomHerderClient) ReclaimActor(ctx context.Context, in *ReclaimActorRequest, opts ...grpc.CallOption) (*ReclaimActorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReclaimActorResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_ReclaimActor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AteomHerderServer is the server API for AteomHerder service.
 // All implementations must embed UnimplementedAteomHerderServer
 // for forward compatibility.
@@ -399,6 +417,13 @@ type AteomHerderServer interface {
 	// predates FILESYSTEM-scope support). Idempotent: a snapshot already scoped
 	// Filesystem succeeds without rewriting anything.
 	DropSnapshotMemory(context.Context, *DropSnapshotMemoryRequest) (*DropSnapshotMemoryResponse, error)
+	// ReclaimActor removes what an actor with no workload on this node left
+	// here: its pause snapshots and its directories. The control plane calls it
+	// when deleting an actor whose pause snapshot lives on this node, which
+	// Terminate never reaches (the actor has no worker to terminate). Refuses
+	// (FailedPrecondition) while an RPC for the actor is in flight or a
+	// workload of it runs on this node. Idempotent.
+	ReclaimActor(context.Context, *ReclaimActorRequest) (*ReclaimActorResponse, error)
 	mustEmbedUnimplementedAteomHerderServer()
 }
 
@@ -426,6 +451,9 @@ func (UnimplementedAteomHerderServer) Terminate(context.Context, *TerminateReque
 }
 func (UnimplementedAteomHerderServer) DropSnapshotMemory(context.Context, *DropSnapshotMemoryRequest) (*DropSnapshotMemoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DropSnapshotMemory not implemented")
+}
+func (UnimplementedAteomHerderServer) ReclaimActor(context.Context, *ReclaimActorRequest) (*ReclaimActorResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReclaimActor not implemented")
 }
 func (UnimplementedAteomHerderServer) mustEmbedUnimplementedAteomHerderServer() {}
 func (UnimplementedAteomHerderServer) testEmbeddedByValue()                     {}
@@ -556,6 +584,24 @@ func _AteomHerder_DropSnapshotMemory_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AteomHerder_ReclaimActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReclaimActorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).ReclaimActor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_ReclaimActor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).ReclaimActor(ctx, req.(*ReclaimActorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AteomHerder_ServiceDesc is the grpc.ServiceDesc for AteomHerder service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -586,6 +632,10 @@ var AteomHerder_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DropSnapshotMemory",
 			Handler:    _AteomHerder_DropSnapshotMemory_Handler,
+		},
+		{
+			MethodName: "ReclaimActor",
+			Handler:    _AteomHerder_ReclaimActor_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
