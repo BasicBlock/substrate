@@ -298,6 +298,7 @@ func main() {
 	)
 	activity := newActorActivity()
 	wmService.activity = activity
+	go wmService.runOrphanSweep(ctx, *orphanSweepPeriod, *orphanGrace)
 	go systemInfoVolumes.run(ctx)
 
 	// Pre-download sandbox assets as SandboxConfigs appear/change so the first
