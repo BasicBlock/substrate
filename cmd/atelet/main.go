@@ -296,6 +296,8 @@ func main() {
 		csiDriverConfigLister,
 		systemInfoVolumes,
 	)
+	activity := newActorActivity()
+	wmService.activity = activity
 	go systemInfoVolumes.run(ctx)
 
 	// Pre-download sandbox assets as SandboxConfigs appear/change so the first
@@ -390,7 +392,7 @@ func main() {
 	svr := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(tlsCfg)),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
+		grpc.ChainUnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor, activity.UnaryInterceptor),
 	)
 	ateletpb.RegisterAteomHerderServer(svr, wmService)
 	reflection.Register(svr)
@@ -450,6 +452,9 @@ type AteomHerder struct {
 	volumePlugins         map[string]volume.VolumePluginWorkerPlane
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
 	systemInfoVolumes     *systemInfoVolumeRefresher
+	// activity tells which actors this node may be using, before their
+	// directories are removed (ReclaimActor, the orphan sweep).
+	activity *actorActivity
 }
 
 var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
@@ -2125,6 +2130,44 @@ func resetActorDirs(actorUID string) error {
 // to proceed while a volume directory is still populated, so a failed unmount
 // cannot become a deletion of the mount's contents, and it can remove a bundle
 // upper dir carrying an image's read-only modes.
+// ReclaimActor removes an actor's pause snapshots and directories from this
+// node when nothing here uses them: no RPC for the actor is in flight and no
+// ateom runs a workload of it.
+func (s *AteomHerder) ReclaimActor(ctx context.Context, req *ateletpb.ReclaimActorRequest) (*ateletpb.ReclaimActorResponse, error) {
+	var errs field.ErrorList
+	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
+	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
+	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
+	if len(errs) > 0 {
+		return nil, status.Error(codes.InvalidArgument, errs.ToAggregate().Error())
+	}
+	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
+	actorUID := req.GetActorUid()
+
+	release, ok := s.activity.claim(actorUID)
+	if !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor %s has an RPC in flight on this node", actorRef)
+	}
+	defer release()
+	running, err := s.activity.running(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "cannot tell whether actor %s runs on this node: %v", actorRef, err)
+	}
+	if running[actorUID] {
+		return nil, status.Errorf(codes.FailedPrecondition, "a workload of actor %s runs on this node", actorRef)
+	}
+
+	s.systemInfoVolumes.Deregister(actorUID)
+	if err := pruneLocalCheckpoints(ctx, actorUID); err != nil {
+		return nil, fmt.Errorf("failed to prune local checkpoints of actor %s: %w", actorRef, err)
+	}
+	if err := removeActorDirs(actorUID); err != nil {
+		return nil, fmt.Errorf("failed to remove the directories of actor %s: %w", actorRef, err)
+	}
+	slog.InfoContext(ctx, "Reclaimed an actor's node state", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
+	return &ateletpb.ReclaimActorResponse{}, nil
+}
+
 func removeActorDirs(actorUID string) error {
 	if err := resetActorDirs(actorUID); err != nil {
 		return err

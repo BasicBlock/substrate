@@ -78,6 +78,9 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 		volumesDetachedErr = fmt.Errorf("while detaching volumes: %w", err)
 		errs = append(errs, volumesDetachedErr)
 	}
+	if err := w.ensureLocalSnapshotsReclaimed(ctx, actorRef, actor); err != nil {
+		errs = append(errs, fmt.Errorf("while reclaiming local snapshots: %w", err))
+	}
 
 	// Release worker if atelet termination and volume detachment did not fail.
 	if atletTerminatedErr == nil && volumesDetachedErr == nil {
@@ -206,6 +209,51 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 	}
 
 	return nil
+}
+
+// ensureLocalSnapshotsReclaimed removes the actor's node-local pause snapshot,
+// and whatever else of it is on that node, which terminating its worker never
+// reaches: a paused actor has no worker, and would otherwise leave the
+// snapshot on the node's disk for good (#664). The assigned worker's node is
+// left to Terminate. A node that is gone took its disk with it.
+func (w *ActorWorkflow) ensureLocalSnapshotsReclaimed(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) (err error) {
+	ctx, done := stepSpan(ctx, "ReclaimLocalSnapshots")
+	defer func() { err = done(err) }()
+
+	nodes := actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots()
+	if len(nodes) == 0 {
+		markSkipped(ctx, "no local snapshot recorded")
+		return nil
+	}
+	var errs []error
+	for _, node := range nodes {
+		if node == actor.GetStatus().GetWorkerAssignment().GetNodeName() {
+			continue
+		}
+		conn, err := w.dialer.DialForAteletOnNode(node)
+		if errors.Is(err, ErrNoAteletOnNode) {
+			slog.InfoContext(ctx, "the node holding the actor's local snapshot is gone", slog.Any("actor", actorRef), slog.String("node", node))
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("while connecting to atelet on node %q: %w", node, err))
+			continue
+		}
+		_, err = ateletpb.NewAteomHerderClient(conn).ReclaimActor(ctx, &ateletpb.ReclaimActorRequest{
+			Atespace:  actor.GetMetadata().GetAtespace(),
+			ActorName: actor.GetMetadata().GetName(),
+			ActorUid:  actor.GetMetadata().GetUid(),
+		})
+		switch status.Code(err) {
+		case codes.OK:
+		case codes.Unimplemented:
+			slog.WarnContext(ctx, "atelet cannot reclaim actors yet; the actor's local snapshot stays on the node",
+				slog.Any("actor", actorRef), slog.String("node", node))
+		default:
+			errs = append(errs, fmt.Errorf("while reclaiming the actor on node %q: %w", node, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ensureVolumesDetachedForDelete detaches external volumes.

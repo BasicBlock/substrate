@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
 	"github.com/agent-substrate/substrate/internal/atelet"
 	"github.com/agent-substrate/substrate/internal/objectstore/objectstoretest"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
@@ -285,5 +286,59 @@ func TestSuspendActor_PausedUploadCommittedBeforeFailing(t *testing.T) {
 	}
 	if got := suspended.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != kept.String() {
 		t.Errorf("ExternalSnapshot = %q, want %q", got, kept)
+	}
+}
+
+func (f *capturingAtelet) ReclaimActor(ctx context.Context, req *ateletpb.ReclaimActorRequest) (*ateletpb.ReclaimActorResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reclaimed = append(f.reclaimed, req.GetActorUid())
+	if f.reclaimErr != nil {
+		return nil, f.reclaimErr
+	}
+	return &ateletpb.ReclaimActorResponse{}, nil
+}
+
+// TestDeleteReclaimsAPausedActorsLocalSnapshot verifies deleting a paused
+// actor has the atelet on its snapshot's node reclaim it (#664), that a node
+// which is gone, or an atelet predating ReclaimActor, does not block the
+// delete, and that another failure does.
+func TestDeleteReclaimsAPausedActorsLocalSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		node        string
+		reclaimErr  error
+		wantCalled  bool
+		wantFailure bool
+	}{
+		{"reclaimed", "node-1", nil, true, false},
+		{"node gone", "node-gone", nil, false, false},
+		{"atelet predates ReclaimActor", "node-1", status.Error(codes.Unimplemented, "unknown method"), true, false},
+		{"atelet refuses", "node-1", status.Error(codes.FailedPrecondition, "a workload runs"), true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			persistence := newTestPersistence(t)
+			w, fake := newWireCaptureWorkflow(t, persistence)
+			fake.reclaimErr = tc.reclaimErr
+			actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+				Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "paused-1"},
+				Status: &ateapipb.ActorStatus{
+					State:             ateapipb.ActorState_ACTOR_STATE_PAUSED,
+					LocalSnapshotInfo: &ateapipb.LocalSnapshotInfo{SnapshotName: "snap-1", NodeVmsWithLocalSnapshots: []string{tc.node}},
+				},
+			})
+
+			err := w.ensureLocalSnapshotsReclaimed(ctx, resources.ActorRef{Atespace: "team-a", Name: "paused-1"}, actor)
+			if (err != nil) != tc.wantFailure {
+				t.Errorf("ensureLocalSnapshotsReclaimed = %v, want failure %v", err, tc.wantFailure)
+			}
+			fake.mu.Lock()
+			called := len(fake.reclaimed) == 1 && fake.reclaimed[0] == actor.GetMetadata().GetUid()
+			fake.mu.Unlock()
+			if called != tc.wantCalled {
+				t.Errorf("reclaimed %v, want called %v", fake.reclaimed, tc.wantCalled)
+			}
+		})
 	}
 }

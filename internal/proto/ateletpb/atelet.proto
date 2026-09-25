@@ -126,6 +126,23 @@ service AteomHerder {
   // predates FILESYSTEM-scope support). Idempotent: a snapshot already scoped
   // Filesystem succeeds without rewriting anything.
   rpc DropSnapshotMemory(DropSnapshotMemoryRequest) returns (DropSnapshotMemoryResponse) {}
+
+  // ReclaimActor removes what an actor with no workload on this node left
+  // here: its pause snapshots and its directories. The control plane calls it
+  // when deleting an actor whose pause snapshot lives on this node, which
+  // Terminate never reaches (the actor has no worker to terminate). Refuses
+  // (FailedPrecondition) while an RPC for the actor is in flight or a
+  // workload of it runs on this node. Idempotent.
+  rpc ReclaimActor(ReclaimActorRequest) returns (ReclaimActorResponse) {}
+}
+
+message ReclaimActorRequest {
+  string atespace = 1;
+  string actor_name = 2;
+  string actor_uid = 3;
+}
+
+message ReclaimActorResponse {
 }
 
 message DropSnapshotMemoryRequest {
