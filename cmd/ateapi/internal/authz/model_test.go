@@ -19,8 +19,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/agent-substrate/substrate/internal/authz"
-	"github.com/agent-substrate/substrate/internal/authz/authztest"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz/authztest"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -62,9 +62,12 @@ func TestModelAssertions(t *testing.T) {
 	for _, tu := range mt.Tuples {
 		keys = append(keys, &openfgav1.TupleKey{User: tu.User, Relation: tu.Relation, Object: tu.Object})
 	}
-	if _, err := srv.FGAServer().Write(ctx, &openfgav1.WriteRequest{
-		StoreId: srv.StoreID(), AuthorizationModelId: srv.ModelID(),
-		Writes: &openfgav1.WriteRequestWrites{TupleKeys: keys},
+	if err := srv.InTx(ctx, func(ctx context.Context) error {
+		_, err := srv.FGAServer().Write(ctx, &openfgav1.WriteRequest{
+			StoreId: srv.StoreID(), AuthorizationModelId: srv.ModelID(),
+			Writes: &openfgav1.WriteRequestWrites{TupleKeys: keys},
+		})
+		return err
 	}); err != nil {
 		t.Fatalf("writing model test tuples: %v", err)
 	}

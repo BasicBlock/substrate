@@ -18,7 +18,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/agent-substrate/substrate/internal/authz"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
 )

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package authztest starts the dependencies of internal/authz for tests.
+// Package authztest starts the dependencies of the authz package for tests.
 package authztest
 
 import (
@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/atepg"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -52,8 +53,9 @@ func configureDockerEnv(ctx context.Context) error {
 	return nil
 }
 
-// StartPostgres starts a PostgreSQL container for the test and returns a pool
-// for it. The test is skipped when Docker is unavailable.
+// StartPostgres starts a PostgreSQL container for the test, migrates it as
+// ate-api does (atepg, whose migrations own OpenFGA's tables), and returns
+// ate-api's pool for it. The test is skipped when Docker is unavailable.
 func StartPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
@@ -79,22 +81,30 @@ func StartPostgres(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("getting postgres connection string: %v", err)
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	probe, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("creating pgxpool: %v", err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-	})
-
+	defer probe.Close()
 	var pingErr error
 	for i := 0; i < 30; i++ {
-		pingErr = pool.Ping(ctx)
-		if pingErr == nil {
-			return pool
+		if pingErr = probe.Ping(ctx); pingErr == nil {
+			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for postgres ping: %v", pingErr)
-	return nil
+	if pingErr != nil {
+		t.Fatalf("timed out waiting for postgres ping: %v", pingErr)
+	}
+
+	persistence, err := atepg.Connect(ctx, dsn, "substrate")
+	if err != nil {
+		t.Fatalf("migrating postgres: %v", err)
+	}
+	pool := persistence.Pool()
+	t.Cleanup(func() {
+		persistence.Close()
+		pool.Close()
+	})
+	return pool
 }

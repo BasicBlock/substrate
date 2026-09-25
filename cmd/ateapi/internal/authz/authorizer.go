@@ -87,17 +87,21 @@ func (a *Authorizer) RecordCreator(ctx context.Context, p principal.PrincipalInf
 	if err != nil {
 		return err
 	}
-	return a.server.write(ctx, []tuple{{User: user, Relation: "creator", Object: AtespaceObject(atespace).ID}}, nil)
+	return a.server.InTx(ctx, func(ctx context.Context) error {
+		return a.server.write(ctx, []tuple{{User: user, Relation: "creator", Object: AtespaceObject(atespace).ID}}, nil)
+	})
 }
 
 // ForgetCreators removes the creator records of a deleted atespace, so a
 // later atespace of the same name does not inherit them.
 func (a *Authorizer) ForgetCreators(ctx context.Context, atespace string) error {
-	creators, err := a.server.read(ctx, &openfgav1.ReadRequestTupleKey{Object: AtespaceObject(atespace).ID, Relation: "creator"})
-	if err != nil {
-		return err
-	}
-	return a.server.write(ctx, nil, creators)
+	return a.server.InTx(ctx, func(ctx context.Context) error {
+		creators, err := a.server.read(ctx, &openfgav1.ReadRequestTupleKey{Object: AtespaceObject(atespace).ID, Relation: "creator"})
+		if err != nil {
+			return err
+		}
+		return a.server.write(ctx, nil, creators)
+	})
 }
 
 func (s *Server) check(ctx context.Context, user string, c Check, extra []tuple) (bool, error) {
@@ -117,15 +121,19 @@ func (s *Server) check(ctx context.Context, user string, c Check, extra []tuple)
 	return resp.GetAllowed(), nil
 }
 
-// reconcile makes the stored role bindings exactly desired, holding the
-// provisioning lock so replicas starting together do not interleave.
+// reconcile makes the stored role bindings exactly desired, in one
+// transaction, holding the provisioning lock so replicas starting together do
+// not interleave.
 func (s *Server) reconcile(ctx context.Context, desired []tuple) error {
 	unlock, err := acquireInitLock(ctx, s.pool)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	return s.InTx(ctx, func(ctx context.Context) error { return s.reconcileInTx(ctx, desired) })
+}
 
+func (s *Server) reconcileInTx(ctx context.Context, desired []tuple) error {
 	stored, err := s.read(ctx, nil)
 	if err != nil {
 		return err
@@ -156,7 +164,8 @@ func (s *Server) reconcile(ctx context.Context, desired []tuple) error {
 	return nil
 }
 
-// read returns every stored tuple matching key, or every tuple when key is nil.
+// read returns every stored tuple matching key, or every tuple when key is
+// nil. ctx must carry a transaction (InTx).
 func (s *Server) read(ctx context.Context, key *openfgav1.ReadRequestTupleKey) ([]tuple, error) {
 	var out []tuple
 	var token string
@@ -182,7 +191,8 @@ func (s *Server) read(ctx context.Context, key *openfgav1.ReadRequestTupleKey) (
 }
 
 // write applies writes and deletes in batches. Writing a stored tuple or
-// deleting a missing one is not an error, so concurrent writers converge.
+// deleting a missing one is not an error, so concurrent writers converge. ctx
+// must carry a transaction (InTx).
 func (s *Server) write(ctx context.Context, writes, deletes []tuple) error {
 	for len(writes) > 0 || len(deletes) > 0 {
 		req := &openfgav1.WriteRequest{StoreId: s.storeID, AuthorizationModelId: s.modelID}

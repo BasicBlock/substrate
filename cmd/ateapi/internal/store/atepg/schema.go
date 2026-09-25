@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -53,6 +54,9 @@ func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("atepg requires PostgreSQL 13 or newer for xid8 and pg_current_snapshot. server_version_num is %d", version)
 	}
 	if err := rejectUnversionedSubstrateSchema(ctx, pool); err != nil {
+		return err
+	}
+	if err := adoptOpenFGATables(ctx, pool); err != nil {
 		return err
 	}
 
@@ -127,6 +131,78 @@ func rejectUnversionedSubstrateSchema(ctx context.Context, pool *pgxpool.Pool) e
 	if hasSubstrateTables && !hasMetadata {
 		return errors.New("unsupported PostgreSQL schema: Substrate tables exist without a migration ledger")
 	}
+	return nil
+}
+
+const (
+	// openFGAMigration is the migration that creates OpenFGA's tables
+	// (migrations/000002_openfga.sql).
+	openFGAMigration = 2
+	// openFGATablesVersion is the OpenFGA PostgreSQL migration version that
+	// openFGAMigration ports.
+	openFGATablesVersion = 6
+)
+
+// adoptOpenFGATables records openFGAMigration as applied in a schema whose
+// OpenFGA tables OpenFGA's own embedded migrations already created: ate-api
+// ran those, tracked in goose_db_version, until its migrations took the tables
+// over. The DDL is the same, and running it again would fail on the existing
+// tables, so the adoption keeps them and every authorization tuple in them. It
+// holds the migrations' lock, so it cannot race another replica's migration.
+func adoptOpenFGATables(ctx context.Context, pool *pgxpool.Pool) error {
+	lockID, err := migrationLockID(ctx, pool)
+	if err != nil {
+		return err
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring a connection to adopt OpenFGA tables: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockID); err != nil {
+		return fmt.Errorf("locking PostgreSQL migrations: %w", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, lockID)
+	}()
+
+	var hasLedger, hasTuples, hasOpenFGALedger bool
+	if err := conn.QueryRow(ctx, `SELECT
+		to_regclass('schema_migrations') IS NOT NULL,
+		to_regclass('tuple') IS NOT NULL,
+		to_regclass('goose_db_version') IS NOT NULL`).Scan(&hasLedger, &hasTuples, &hasOpenFGALedger); err != nil {
+		return fmt.Errorf("checking for OpenFGA tables: %w", err)
+	}
+	if !hasTuples || !hasLedger {
+		// No OpenFGA tables to adopt, or a schema Substrate never migrated,
+		// which migration 1 then fails on loudly.
+		return nil
+	}
+	var applied []int64
+	if err := conn.QueryRow(ctx, `SELECT COALESCE(array_agg(version_id), '{}'::bigint[]) FROM schema_migrations WHERE is_applied AND version_id IN (1, $1)`, openFGAMigration).Scan(&applied); err != nil {
+		return fmt.Errorf("reading PostgreSQL migration versions: %w", err)
+	}
+	if slices.Contains(applied, openFGAMigration) {
+		return nil
+	}
+	if !slices.Contains(applied, 1) {
+		return errors.New("unsupported PostgreSQL schema: OpenFGA tables exist before Substrate's first migration")
+	}
+	if !hasOpenFGALedger {
+		return errors.New("unsupported PostgreSQL schema: OpenFGA tables exist without OpenFGA's migration ledger (goose_db_version)")
+	}
+	var version int64
+	if err := conn.QueryRow(ctx, `SELECT COALESCE(max(version_id), 0) FROM goose_db_version WHERE is_applied`).Scan(&version); err != nil {
+		return fmt.Errorf("reading OpenFGA's migration version: %w", err)
+	}
+	if version != openFGATablesVersion {
+		return fmt.Errorf("unsupported PostgreSQL schema: OpenFGA's tables are at its migration %d, but migration %d creates them at %d", version, openFGAMigration, openFGATablesVersion)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO schema_migrations (version_id, is_applied) VALUES ($1, true)`, openFGAMigration); err != nil {
+		return fmt.Errorf("recording the adopted OpenFGA tables: %w", err)
+	}
+	slog.InfoContext(ctx, "Adopted OpenFGA tables created by OpenFGA's own migrations",
+		slog.Int("migration", openFGAMigration), slog.Int64("openfga_version", version))
 	return nil
 }
 

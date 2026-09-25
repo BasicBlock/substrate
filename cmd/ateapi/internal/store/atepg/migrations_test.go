@@ -18,7 +18,10 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -26,10 +29,59 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/openfga/openfga/assets"
 	"github.com/pressly/goose/v3"
 )
 
+const pinnedOpenFGAMigrationVersion = 6
+
 var transactionControl = regexp.MustCompile(`(?im)^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK)\s*;`)
+
+// TestOpenFGAMigrationVersionGuard ensures that bumping github.com/openfga/openfga
+// in go.mod cannot silently introduce schema or query drift.
+//
+// Why this is needed:
+//  1. Substrate manages the OpenFGA PostgreSQL tables directly in
+//     migrations/000002_openfga.sql (rather than running OpenFGA's embedded Goose
+//     migrations) so that OpenFGA tables and Substrate resource tables live in
+//     the same PostgreSQL schema and migration ledger.
+//  2. cmd/ateapi/internal/authz/datastore.go adapts upstream postgres.Datastore
+//     SQL queries (pinned to OpenFGA PostgreSQL migration version 6) so reads
+//     and writes can execute on an existing caller pgx.Tx.
+//
+// If a future go.mod upgrade bumps OpenFGA to a version with a migration > 6,
+// this test will fail in CI until the new DDL is ported as a new migration in
+// cmd/ateapi/internal/store/atepg/migrations/ and datastore.go is verified.
+func TestOpenFGAMigrationVersionGuard(t *testing.T) {
+	entries, err := fs.ReadDir(assets.EmbedMigrations, assets.PostgresMigrationDir)
+	if err != nil {
+		t.Fatalf("read embedded OpenFGA migrations: %v", err)
+	}
+	var maxVersion int
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sql" {
+			continue
+		}
+		prefix, _, ok := strings.Cut(entry.Name(), "_")
+		if !ok {
+			t.Fatalf("unexpected OpenFGA migration filename %q", entry.Name())
+		}
+		v, err := strconv.Atoi(prefix)
+		if err != nil {
+			t.Fatalf("parse OpenFGA migration version from %q: %v", entry.Name(), err)
+		}
+		if v > maxVersion {
+			maxVersion = v
+		}
+	}
+	if maxVersion != pinnedOpenFGAMigrationVersion {
+		t.Fatalf(
+			"OpenFGA embedded PostgreSQL migrations are at version %d, but 000002_openfga.sql and cmd/ateapi/internal/authz/datastore.go are pinned to version %d; port any new OpenFGA DDL to cmd/ateapi/internal/store/atepg/migrations/ and verify TransactionalDatastore before updating pinnedOpenFGAMigrationVersion",
+			maxVersion, pinnedOpenFGAMigrationVersion,
+		)
+	}
+}
 
 func TestMigrationPolicy(t *testing.T) {
 	err := fs.WalkDir(migrationFiles, "migrations", func(path string, entry fs.DirEntry, err error) error {
@@ -189,7 +241,7 @@ func TestMigrationSchemaStates(t *testing.T) {
 		}
 		p.Close()
 		p.pool.Close()
-		if _, err := pool.Exec(ctx, `INSERT INTO "migration-ahead".schema_migrations (version_id, is_applied) VALUES (2, true)`); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO "migration-ahead".schema_migrations (version_id, is_applied) VALUES ((SELECT max(version_id) + 1 FROM "migration-ahead".schema_migrations), true)`); err != nil {
 			t.Fatalf("setting ahead migration state: %v", err)
 		}
 
@@ -318,6 +370,72 @@ func TestMigrationFailureLeavesCompletedPrefixAndResumes(t *testing.T) {
 	}
 	if !resumed {
 		t.Error("migration 3 was not applied after restart")
+	}
+}
+
+// TestMigrationsAdoptOpenFGATables verifies a schema whose OpenFGA tables
+// OpenFGA's own migrations created (ate-api before migration 2) keeps them,
+// and their rows, with migration 2 recorded instead of run.
+func TestMigrationsAdoptOpenFGATables(t *testing.T) {
+	pool := requirePool(t)
+	ctx := t.Context()
+	const schema = "migration-openfga-legacy"
+	if _, err := pool.Exec(ctx, `DROP SCHEMA IF EXISTS "migration-openfga-legacy" CASCADE; CREATE SCHEMA "migration-openfga-legacy"`); err != nil {
+		t.Fatalf("resetting schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS "migration-openfga-legacy" CASCADE`)
+	})
+	legacyPool, err := pgxpool.New(ctx, containerDSN+"&search_path="+schema)
+	if err != nil {
+		t.Fatalf("opening pool: %v", err)
+	}
+	t.Cleanup(legacyPool.Close)
+
+	// Substrate's migration 1, then OpenFGA's own migrations, as ate-api ran
+	// them before migration 2 existed.
+	first, err := fs.ReadFile(migrationFiles, "migrations/000001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	substrate, err := openMigrationProvider(ctx, legacyPool, fstest.MapFS{"000001_initial.sql": {Data: first}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := substrate.Up(ctx); err != nil {
+		t.Fatalf("applying migration 1: %v", err)
+	}
+	_ = substrate.Close()
+	openfgaMigrations, err := fs.Sub(assets.EmbedMigrations, assets.PostgresMigrationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openfga, err := goose.NewProvider(goose.DialectPostgres, stdlib.OpenDBFromPool(legacyPool), openfgaMigrations, goose.WithTableName("goose_db_version"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openfga.Up(ctx); err != nil {
+		t.Fatalf("applying OpenFGA's migrations: %v", err)
+	}
+	_ = openfga.Close()
+	if _, err := legacyPool.Exec(ctx, `INSERT INTO store (id, name, created_at) VALUES ('store-1', 'substrate', now())`); err != nil {
+		t.Fatalf("writing a store row: %v", err)
+	}
+
+	p, err := Connect(ctx, containerDSN, schema)
+	if err != nil {
+		t.Fatalf("Connect with OpenFGA's own tables: %v", err)
+	}
+	p.Close()
+	p.pool.Close()
+
+	versions := appliedMigrationVersions(t, legacyPool)
+	if !slices.Contains(versions, openFGAMigration) {
+		t.Errorf("applied migrations = %v, want %d recorded", versions, openFGAMigration)
+	}
+	var stores int
+	if err := legacyPool.QueryRow(ctx, `SELECT count(*) FROM store WHERE id = 'store-1'`).Scan(&stores); err != nil || stores != 1 {
+		t.Errorf("store rows = %d (%v), want the adopted row kept", stores, err)
 	}
 }
 

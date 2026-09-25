@@ -19,8 +19,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/internal/authz"
-	"github.com/agent-substrate/substrate/internal/authz/authztest"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz/authztest"
 	"github.com/agent-substrate/substrate/internal/principal"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,15 +40,7 @@ func allowed(t *testing.T, a *authz.Authorizer, p principal.PrincipalInfo, objec
 
 func newServer(t *testing.T, pool *pgxpool.Pool) *authz.Server {
 	t.Helper()
-	cfg, err := pgxpool.ParseConfig(pool.Config().ConnString())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dedicated, err := pgxpool.NewWithConfig(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv, err := authz.NewServer(context.Background(), dedicated)
+	srv, err := authz.NewServer(context.Background(), pool)
 	if err != nil {
 		t.Fatal(err)
 	}

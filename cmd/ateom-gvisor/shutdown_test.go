@@ -196,39 +196,46 @@ func TestKillContainerHonorsParentCancellation(t *testing.T) {
 	}
 }
 
-// TestAwaitSessionEnd covers the drain's head start for a suspend: an idle
-// worker has nothing to wait for, a checkpoint that ends the session ends the
+// TestAwaitSessionEnd covers the drain's head start for suspends: an idle
+// worker has nothing to wait for, checkpoints that unhost every actor end the
 // wait, and a session nothing ends is given up on at the deadline.
 func TestAwaitSessionEnd(t *testing.T) {
 	defer func(old time.Duration) { drainPollInterval = old }(drainPollInterval)
 	drainPollInterval = 5 * time.Millisecond
 	ctx := context.Background()
+	hosting := func(uids ...string) *AteomService {
+		s := &AteomService{actors: map[string]*hostedActor{}}
+		for _, uid := range uids {
+			s.actors[uid] = &hostedActor{session: &workloadSession{}}
+		}
+		return s
+	}
 
 	t.Run("idle worker", func(t *testing.T) {
-		s := &AteomService{lock: newCancelableMutex()}
-		if !s.awaitSessionEnd(ctx, time.Now()) {
+		if !hosting().awaitSessionEnd(ctx, time.Now()) {
 			t.Error("awaitSessionEnd with no session = false, want true")
 		}
 	})
 
 	t.Run("suspended while waiting", func(t *testing.T) {
-		s := &AteomService{lock: newCancelableMutex(), activeSession: &workloadSession{}}
+		s := hosting("actor-a", "actor-b")
 		go func() {
-			time.Sleep(20 * time.Millisecond)
-			// As CheckpointWorkload does: hold the lock for the whole
-			// checkpoint, then clear the session.
-			s.lock.Lock()
-			time.Sleep(20 * time.Millisecond)
-			s.activeSession = nil
-			s.lock.Unlock()
+			// As CheckpointWorkload does, through terminateWorkload: each
+			// checkpoint unhosts its actor.
+			for _, uid := range []string{"actor-a", "actor-b"} {
+				time.Sleep(20 * time.Millisecond)
+				if err := s.unhostActor(ctx, uid); err != nil {
+					t.Errorf("unhostActor(%s): %v", uid, err)
+				}
+			}
 		}()
 		if !s.awaitSessionEnd(ctx, time.Now().Add(10*time.Second)) {
-			t.Error("awaitSessionEnd after a checkpoint = false, want true")
+			t.Error("awaitSessionEnd after the checkpoints = false, want true")
 		}
 	})
 
 	t.Run("never suspended", func(t *testing.T) {
-		s := &AteomService{lock: newCancelableMutex(), activeSession: &workloadSession{}}
+		s := hosting("actor-a")
 		start := time.Now()
 		if s.awaitSessionEnd(ctx, start.Add(50*time.Millisecond)) {
 			t.Error("awaitSessionEnd with a live session = true, want false")
@@ -239,7 +246,7 @@ func TestAwaitSessionEnd(t *testing.T) {
 	})
 
 	t.Run("cancelled", func(t *testing.T) {
-		s := &AteomService{lock: newCancelableMutex(), activeSession: &workloadSession{}}
+		s := hosting("actor-a")
 		ctx, cancel := context.WithCancel(ctx)
 		cancel()
 		start := time.Now()

@@ -18,9 +18,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz/authztest"
 	"github.com/agent-substrate/substrate/internal/ateapiauth"
-	"github.com/agent-substrate/substrate/internal/authz"
-	"github.com/agent-substrate/substrate/internal/authz/authztest"
 	"github.com/agent-substrate/substrate/internal/principal"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"

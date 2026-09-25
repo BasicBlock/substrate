@@ -47,6 +47,7 @@ type global
     # May create atespaces, becoming each new atespace's creator.
     define atespace_creator: [user, group#member]
     define can_create_atespace: owner or atespace_creator
+    define can_list_atespaces: viewer
     define can_get: viewer
 
     # Reaches can_connect on every actor in every atespace (see actor.can_connect
@@ -96,6 +97,7 @@ type atespace
     define can_create_actor: editor
     define can_create_actor_template: editor
     define can_get: viewer
+    # Tag create, update and delete (rpcauthz rules.go).
     define can_update: editor
     define can_delete: owner
 

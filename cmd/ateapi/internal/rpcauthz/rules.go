@@ -19,7 +19,7 @@ package rpcauthz
 import (
 	"fmt"
 
-	"github.com/agent-substrate/substrate/internal/authz"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
@@ -171,6 +171,9 @@ var rules = map[string]rule{
 	// Only atelet may mint an ateom-for-actor certificate; the handler
 	// authenticates it by its SPIFFE ID (cmd/ateapi/internal/workerservice).
 	ateapipb.WorkerService_MintAteomActorCertificate_FullMethodName: handlerAuthorized,
+	// Only atelet may ask to suspend an actor, and only one assigned to a
+	// worker on its own node (cmd/ateapi/internal/ateletauth).
+	ateapipb.WorkerService_RequestActorSuspend_FullMethodName: handlerAuthorized,
 
 	// The API schema is public.
 	grpc_reflection_v1.ServerReflection_ServerReflectionInfo_FullMethodName:      global("can_get"),
