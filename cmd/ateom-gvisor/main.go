@@ -1132,7 +1132,14 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources
 	// Keep this as best-effort cleanup: atelet resets the bundle and checkpoint
 	// directories after uploading the snapshot.
 	if err := cleanupContainers(cleanupCtx, rcmd, containers); err != nil {
-		errs = append(errs, fmt.Errorf("while cleaning up runsc containers: %w", err))
+		// runsc itself may be what is stuck (a hung sandbox, or a runsc command
+		// holding the container's lock), and would fail every retry the same
+		// way. Force the sandbox down without it instead.
+		slog.WarnContext(ctx, "runsc could not tear the sandbox down; forcing it",
+			slog.String("actorUID", actorUID), slog.Any("err", err))
+		if forceErr := newSandboxForcer(s.cgroupRoot).forceStop(context.WithoutCancel(ctx), actorUID, actorDirs, containerNames(containers)); forceErr != nil {
+			errs = append(errs, fmt.Errorf("while cleaning up runsc containers: %w (forcing the sandbox down: %v)", err, forceErr))
+		}
 	}
 
 	// The actor may resume on another worker, so this one may never see another
