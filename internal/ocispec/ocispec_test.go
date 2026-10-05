@@ -141,7 +141,7 @@ func TestBuild_Capabilities(t *testing.T) {
 
 // Actors cannot raise their own hard limit, so it must fit development tools.
 func TestBuild_OpenFileLimit(t *testing.T) {
-	spec := Build(Options{ActorUID: testActorUID, ContainerName: "app", Args: []string{"/app"}})
+	spec := Build(Options{Args: []string{"/app"}})
 
 	var got []specs.POSIXRlimit
 	for _, r := range spec.Process.Rlimits {

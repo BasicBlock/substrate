@@ -423,7 +423,7 @@ func TestTerminateWithoutSandboxRecord(t *testing.T) {
 	ateom := &fakeAteom{}
 	serveFakeAteom(t, ateom)
 
-	actorDir := ateompath.ActorPath(actorUID)
+	actorDir := ateletpath.ActorPath(actorUID)
 	if err := os.MkdirAll(filepath.Join(actorDir, "bundles"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
