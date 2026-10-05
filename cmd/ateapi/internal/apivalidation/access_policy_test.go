@@ -261,7 +261,7 @@ func TestValidateCreateAtespaceAccessPolicyRequest(t *testing.T) {
 	}, {
 		name: "invalid member",
 		req: &ateapipb.CreateAtespaceAccessPolicyRequest{Atespace: atespace, AccessPolicy: validAccessPolicy(func(p *ateapipb.AccessPolicy) {
-			p.Bindings[0].Members = []string{"group:eng"}
+			p.Bindings[0].Members = []string{"team:eng"}
 		})},
 		wantError: field.ErrorList{field.Invalid(policyBindings.Index(0).Child("members").Index(0), nil, "")},
 	}}
