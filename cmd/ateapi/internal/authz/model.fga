@@ -76,9 +76,12 @@ type atespace
     define parent_pattern: [atespace_pattern]
 
     # The principal that created the atespace, making it an owner without an
-    # explicit binding. Nothing currently writes this tuple (no handler calls
-    # RecordCreator), so it is inert until one does; role bindings written
-    # through the AccessPolicy RPCs are unaffected.
+    # explicit binding. The interceptor records it after CreateAtespace's
+    # handler succeeds and forgets it after DeleteAtespace's does
+    # (Authorizer.RecordCreator / ForgetCreators, called from
+    # recordAtespaceLifecycle in interceptor.go), keyed on the same
+    # formatUser(p.ID) form Check uses, so the creator's later calls match;
+    # role bindings written through the AccessPolicy RPCs are unaffected.
     define creator: [user]
 
     # --- 1. Aligned 3-Tier Roles ---
