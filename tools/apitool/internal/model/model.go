@@ -562,6 +562,11 @@ var resourceNames = []string{
 }
 
 func resourceForMethodName(methodName string) (string, error) {
+	// This lifecycle RPC updates an Actor's stored snapshot; its name predates
+	// the convention of including the resource name in every method.
+	if methodName == "DropSnapshotMemory" {
+		return "Actor", nil
+	}
 	var matches []string
 	for _, name := range resourceNames {
 		if strings.Contains(methodName, name) {

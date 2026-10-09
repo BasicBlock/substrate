@@ -108,10 +108,17 @@ layer diffIDs in order — layers shared by N images exist once.
 
 Actor starts are not the only caller. atelet also prewarms: the pause images
 of SandboxConfigs, and (`--template-image-prewarm-interval`, every minute by
-default) the container images of the ActorTemplates whose sandbox class and
-worker selector match a WorkerPool with a pod on the node. Both go through
+default) a bounded set of container images from ActorTemplates whose sandbox
+class and worker selector match a WorkerPool with a pod on the node.
+`--template-image-prewarm-max-images` defaults to four distinct images (zero
+disables template prewarming). Actors assigned to this node take priority,
+then templates referenced by recently updated actors, then recently created
+templates. Each pass calls `EnsureImage` again: cache hits renew recency and
+misses restore evicted layers. Images outside the selected set age out instead
+of historical templates churning the cache. Both prewarm paths go through
 `EnsureImage`, so a prewarm and an actor start of the same image collapse
-into one pull.
+into one pull. The image-count limit is not a byte reservation; tune it for the
+cache capacity and image sizes.
 
 `prepareOCIDirectory` in atelet then writes `rootfs-overlay.json`
 (`OverlaySpec`) into the bundle next to `config.json`, listing the layer

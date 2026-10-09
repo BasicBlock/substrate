@@ -120,7 +120,7 @@ func TestResolveSandboxAssets(t *testing.T) {
 }
 
 // TestSandboxAssetsProto_CPUFeatures pins CPU-feature leveling
-// (agent-substrate/substrate#1657) travelling with the sandbox binaries: set
+// (agent-substrate/substrate#1657) traveling with the sandbox binaries: set
 // on the SandboxConfig, it reaches the ateletpb.SandboxAssets atelet fetches;
 // unset, the proto field stays empty.
 func TestSandboxAssetsProto_CPUFeatures(t *testing.T) {
