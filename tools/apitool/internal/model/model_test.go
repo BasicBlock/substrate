@@ -275,3 +275,17 @@ func TestResources_InvalidMethodName(t *testing.T) {
 		})
 	}
 }
+
+func TestResourcesDropSnapshotMemoryTargetsActor(t *testing.T) {
+	api := &model.API{
+		Messages: []model.Message{{Name: "Actor", FullName: "ateapi.Actor"}},
+		Services: []model.Service{{Name: "Control", Methods: []model.Method{{Name: "DropSnapshotMemory"}}}},
+	}
+	groups, err := model.Resources(api)
+	if err != nil {
+		t.Fatalf("Resources() error = %v", err)
+	}
+	if len(groups) != 1 || groups[0].Message.Name != "Actor" || len(groups[0].Methods) != 1 || groups[0].Methods[0].Name != "DropSnapshotMemory" {
+		t.Fatalf("Resources() = %+v, want DropSnapshotMemory grouped under Actor", groups)
+	}
+}

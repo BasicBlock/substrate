@@ -55,6 +55,15 @@ jobs:
     # this guards, and that happens on the push to main, not on the PR.
     - name: Verify immutable PostgreSQL migrations
       run: hack/verify/postgresql-migrations.sh
+    # Register before running so the final guard also catches a suite that
+    # never starts or fails before writing its report. Root tests register
+    # their own report in run-root-tests.sh.
+    - name: Register unit test reports
+      run: |
+        make build-junittool
+        for suite in unit apitool gcp-secret-manager; do
+          bin/junittool register "${ARTIFACTS}/${suite}.xml"
+        done
     # gotestsum wraps go test to emit JUnit; the go test arguments are unchanged.
     - name: unit tests
       run: hack/run-tool.sh gotestsum --junitfile "${ARTIFACTS}/unit.xml"
