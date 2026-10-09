@@ -145,9 +145,9 @@ func TestConfigTuples(t *testing.T) {
 		{user: "group:google/basicblock#member", relation: "atespace_creator", object: GlobalRootObject}: true,
 		// The "kubernetes" provider segment is dropped, like every other
 		// principal reference (see configMember's doc comment).
-		{user: "user:system%3Aserviceaccount%3Ainternal-preview%3Apreview-proxy", relation: "connector", object: GlobalRootObject}: true,
-		{user: "user:spiffe%3A//ns/sa", relation: RoleOwner, object: "atespace:team1"}:                                            true,
-		{user: "group:google/basicblock#member", relation: RoleViewer, object: "atespace_pattern:ci-"}:                           true,
+		{user: "user:system%3Aserviceaccount%3Ainternal-preview%3Apreview-proxy", relation: "connector", object: GlobalRootObject}:   true,
+		{user: "user:spiffe%3A//ns/sa", relation: RoleOwner, object: "atespace:team1"}:                                               true,
+		{user: "group:google/basicblock#member", relation: RoleViewer, object: "atespace_pattern:ci-"}:                               true,
 		{user: "user:system%3Aserviceaccount%3Ainternal-eve%3Adevbox-reaper", relation: RoleEditor, object: "atespace_pattern:dev-"}: true,
 	}
 	if len(tuples) != len(want) {

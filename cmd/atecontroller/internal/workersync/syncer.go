@@ -127,7 +127,7 @@ func (k workerKey) logAttrs() []any {
 // key against the current informer cache state, requeuing with rate-limited
 // backoff on transient failures such as a lost version precondition.
 type WorkerPoolSyncer struct {
-	client             ateapipb.ControlClient
+	client ateapipb.ControlClient
 	// pods deletes a worker pod that reaches a terminal phase and patches a
 	// worker pod's pod-deletion-cost annotation.
 	pods               corev1client.PodsGetter

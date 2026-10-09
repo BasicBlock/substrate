@@ -247,8 +247,8 @@ var defaultRPCPermissions = map[string]rpcRule{
 	// actor's stored state, the same authority as suspending it.
 	ateapipb.Control_DropSnapshotMemory_FullMethodName: rule(actorRule[*ateapipb.DropSnapshotMemoryRequest](RelationCanSuspend)),
 	ateapipb.Control_ResumeActor_FullMethodName:        rule(actorRule[*ateapipb.ResumeActorRequest](RelationCanResume)),
-	ateapipb.Control_RevertActor_FullMethodName: rule(actorRule[*ateapipb.RevertActorRequest](RelationCanRevert)),
-	ateapipb.Control_DeleteActor_FullMethodName: rule(actorRule[*ateapipb.DeleteActorRequest](RelationCanDelete)),
+	ateapipb.Control_RevertActor_FullMethodName:        rule(actorRule[*ateapipb.RevertActorRequest](RelationCanRevert)),
+	ateapipb.Control_DeleteActor_FullMethodName:        rule(actorRule[*ateapipb.DeleteActorRequest](RelationCanDelete)),
 
 	// The ingress gateway asks on its clients' behalf; the answer checks the
 	// client's can_connect, and would otherwise reveal whether a token is valid.
