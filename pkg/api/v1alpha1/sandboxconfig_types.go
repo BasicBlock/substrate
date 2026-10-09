@@ -92,7 +92,7 @@ type SandboxConfigSpec struct {
 	// CPUFeatures levels a gVisor sandbox's guest CPUID to the intersection of
 	// the host's CPU features and this list, via runsc's
 	// dev.gvisor.internal.cpufeatures OCI annotation. At checkpoint, gVisor
-	// records that levelled set instead of the raw host CPU, so the snapshot
+	// records that leveled set instead of the raw host CPU, so the snapshot
 	// can later restore on any worker whose CPU is a superset of it -- letting
 	// a WorkerPool span more than one CPU model. See
 	// https://github.com/agent-substrate/substrate/issues/1657.

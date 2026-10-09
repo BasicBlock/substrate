@@ -40,7 +40,7 @@ const devShm = "/dev/shm"
 
 // cpuFeaturesAnnotation is runsc's OCI annotation that levels the sandbox's
 // guest CPUID to the intersection of the host's CPU features and a declared
-// allow-list, so a checkpoint records that levelled set instead of the raw
+// allow-list, so a checkpoint records that leveled set instead of the raw
 // host CPU (google/gvisor#11498). See
 // https://github.com/agent-substrate/substrate/issues/1657.
 const cpuFeaturesAnnotation = "dev.gvisor.internal.cpufeatures"
