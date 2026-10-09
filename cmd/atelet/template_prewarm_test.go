@@ -15,25 +15,43 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log"
+	"math"
+	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"google.golang.org/grpc"
 
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
-// fakePrewarmControl serves Workers and ActorTemplates one per page, so every
+// fakePrewarmControl serves Actors, Workers and ActorTemplates one per page, so every
 // listing exercises the paging.
 type fakePrewarmControl struct {
+	actors    []*ateapipb.Actor
 	workers   []*ateapipb.Worker
 	templates []*ateapipb.ActorTemplate
 	err       error
+	actorsErr error
 }
 
 func prewarmPage[T any](items []T, token string) ([]T, string) {
@@ -46,6 +64,17 @@ func prewarmPage[T any](items []T, token string) ([]T, string) {
 		next = strconv.Itoa(start + 1)
 	}
 	return items[start : start+1], next
+}
+
+func (f *fakePrewarmControl) ListActors(_ context.Context, in *ateapipb.ListActorsRequest, _ ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
+	if in.GetAtespace() != "" {
+		return nil, errors.New("the prewarmer must list actors across all atespaces")
+	}
+	if f.actorsErr != nil {
+		return nil, f.actorsErr
+	}
+	items, next := prewarmPage(f.actors, in.GetPageToken())
+	return &ateapipb.ListActorsResponse{Actors: items, NextPageToken: next}, nil
 }
 
 func (f *fakePrewarmControl) ListWorkers(_ context.Context, in *ateapipb.ListWorkersRequest, _ ...grpc.CallOption) (*ateapipb.ListWorkersResponse, error) {
@@ -126,7 +155,7 @@ func TestTemplateImagePrewarmWanted(t *testing.T) {
 			prewarmTemplate(microvm, map[string]string{"workload": "workspace"}, "registry/vm@sha256:5"),
 		},
 	}
-	p := &templateImagePrewarmer{control: control, images: &fakePrewarmImages{}, pools: prewarmPools("workspaces"), pulled: map[string]bool{}}
+	p := &templateImagePrewarmer{control: control, images: &fakePrewarmImages{}, pools: prewarmPools("workspaces")}
 	got, err := p.wanted(context.Background())
 	if err != nil {
 		t.Fatalf("wanted: %v", err)
@@ -157,8 +186,7 @@ func TestTemplateImagePrewarmWanted(t *testing.T) {
 }
 
 // TestTemplateImagePrewarmPass verifies that a pass pulls each wanted image
-// once, and that a failed pull is retried by the next pass while a pulled one
-// is not pulled again.
+// each pass, so cache eviction and failed pulls are retried.
 func TestTemplateImagePrewarmPass(t *testing.T) {
 	gvisor := ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR
 	control := &fakePrewarmControl{
@@ -166,15 +194,172 @@ func TestTemplateImagePrewarmPass(t *testing.T) {
 		templates: []*ateapipb.ActorTemplate{prewarmTemplate(gvisor, nil, "registry/a@sha256:1", "registry/b@sha256:2")},
 	}
 	images := &fakePrewarmImages{fail: map[string]bool{"registry/b@sha256:2": true}}
-	p := &templateImagePrewarmer{control: control, images: images, pools: prewarmPools("workspaces"), pulled: map[string]bool{}}
+	p := &templateImagePrewarmer{control: control, images: images, pools: prewarmPools("workspaces")}
 
 	p.pass(context.Background())
 	images.fail = nil
 	p.pass(context.Background())
 	p.pass(context.Background())
 
-	want := []string{"registry/a@sha256:1", "registry/b@sha256:2", "registry/b@sha256:2"}
+	want := []string{"registry/a@sha256:1", "registry/b@sha256:2", "registry/a@sha256:1", "registry/b@sha256:2", "registry/a@sha256:1", "registry/b@sha256:2"}
 	if !slices.Equal(images.ensured, want) {
 		t.Errorf("ensured = %v, want %v", images.ensured, want)
+	}
+}
+
+func TestTemplateImagePrewarmRewarmsAfterEviction(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(server.Close)
+	tag, err := name.NewTag(strings.TrimPrefix(server.URL, "http://")+"/workspace:test", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	if err := tw.WriteHeader(&tar.Header{Name: "file", Mode: 0o644, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(archive.Bytes())), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := mutate.AppendLayers(empty.Image, layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(tag, img); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := tag.Context().Name() + "@" + digest.String()
+	store, err := imagecache.New(t.TempDir(), imagecache.WithMinAge(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := &fakePrewarmControl{
+		workers:   []*ateapipb.Worker{prewarmWorker("workspaces", "gvisor", nil)},
+		templates: []*ateapipb.ActorTemplate{prewarmTemplate(ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, nil, ref)},
+	}
+	p := &templateImagePrewarmer{control: control, images: store, pools: prewarmPools("workspaces")}
+	p.pass(ctx)
+	if size, err := store.CacheSize(); err != nil || size == 0 {
+		t.Fatalf("initial prewarm cache size = %d, %v", size, err)
+	}
+	stats, err := store.EvictUnused(ctx, math.MaxInt64, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.EvictedImages != 1 || stats.EvictedLayers != 1 {
+		t.Fatalf("eviction = %+v, want one image and layer", stats)
+	}
+	p.pass(ctx)
+	if size, err := store.CacheSize(); err != nil || size == 0 {
+		t.Fatalf("selected image remains missing after eviction and another prewarm pass: cache size = %d, %v", size, err)
+	}
+}
+
+func TestTemplateImagePrewarmPrioritizesDemand(t *testing.T) {
+	template := func(name, image string, created int64) *ateapipb.ActorTemplate {
+		tmpl := prewarmTemplate(ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, nil, image)
+		tmpl.Metadata = &ateapipb.ResourceMetadata{Atespace: "dev", Name: name, CreateTime: timestamppb.New(time.Unix(created, 0))}
+		return tmpl
+	}
+	actor := func(name, pod string, updated int64) *ateapipb.Actor {
+		return &ateapipb.Actor{
+			Metadata:      &ateapipb.ResourceMetadata{UpdateTime: timestamppb.New(time.Unix(updated, 0))},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "dev", Name: name},
+			Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodUid: pod}},
+		}
+	}
+	control := &fakePrewarmControl{
+		workers: []*ateapipb.Worker{prewarmWorker("workspaces", "gvisor", nil)},
+		templates: []*ateapipb.ActorTemplate{
+			template("old-local", "registry/z-local@sha256:1", 1),
+			template("recent-actor", "registry/y-recent@sha256:2", 2),
+			template("older-actor", "registry/x-older@sha256:3", 3),
+			template("newest-unused", "registry/w-newest@sha256:4", 100),
+			template("old-unused", "registry/a-unused@sha256:5", 4),
+			template("older-unused", "registry/b-unused@sha256:6", 5),
+		},
+		actors: []*ateapipb.Actor{actor("older-actor", "elsewhere", 10), actor("recent-actor", "elsewhere", 20), actor("old-local", "pod-0", 5)},
+	}
+	// A deleting actor must not pull an unused old image ahead of actual demand.
+	deleting := actor("old-unused", "pod-0", 200)
+	deleting.Status.State = ateapipb.ActorState_ACTOR_STATE_DELETING
+	control.actors = append(control.actors, deleting)
+	p := &templateImagePrewarmer{control: control, pools: prewarmPools("workspaces")}
+	got, err := p.wanted(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"registry/z-local@sha256:1", "registry/y-recent@sha256:2", "registry/x-older@sha256:3", "registry/w-newest@sha256:4"}
+	if !slices.Equal(got, want) {
+		t.Errorf("wanted = %v, want four priority images %v", got, want)
+	}
+}
+
+func TestTemplateImagePrewarmLimit(t *testing.T) {
+	original := *templateImagePrewarmMaxImages
+	t.Cleanup(func() { *templateImagePrewarmMaxImages = original })
+	control := &fakePrewarmControl{
+		workers:   []*ateapipb.Worker{prewarmWorker("workspaces", "gvisor", nil)},
+		templates: []*ateapipb.ActorTemplate{prewarmTemplate(ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, nil, "registry/c@sha256:3", "registry/a@sha256:1", "registry/a@sha256:1", "registry/b@sha256:2")},
+	}
+	p := &templateImagePrewarmer{control: control, pools: prewarmPools("workspaces")}
+	*templateImagePrewarmMaxImages = 2
+	got, err := p.wanted(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"registry/a@sha256:1", "registry/b@sha256:2"}; !slices.Equal(got, want) {
+		t.Errorf("wanted = %v, want %v", got, want)
+	}
+	*templateImagePrewarmMaxImages = 0
+	// Disabled prewarming must not make any control-plane calls.
+	p.control = nil
+	if got, err := p.wanted(context.Background()); err != nil || len(got) != 0 {
+		t.Errorf("disabled wanted = %v, %v", got, err)
+	}
+}
+
+func TestTemplateImagePrewarmActorListFailure(t *testing.T) {
+	control := &fakePrewarmControl{
+		workers:   []*ateapipb.Worker{prewarmWorker("workspaces", "gvisor", nil)},
+		actorsErr: errors.New("actor listing unavailable"),
+	}
+	p := &templateImagePrewarmer{control: control, pools: prewarmPools("workspaces")}
+	if _, err := p.wanted(context.Background()); !errors.Is(err, control.actorsErr) {
+		t.Errorf("wanted error = %v, want actor listing error", err)
+	}
+}
+
+func TestTemplateImagePrewarmScopesDemand(t *testing.T) {
+	gvisor := ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR
+	used := prewarmTemplate(gvisor, nil, "registry/z-used@sha256:1")
+	used.Metadata = &ateapipb.ResourceMetadata{Atespace: "used", Name: "same-name"}
+	unused := prewarmTemplate(gvisor, nil, "registry/a-unused@sha256:2")
+	unused.Metadata = &ateapipb.ResourceMetadata{Atespace: "unused", Name: "same-name"}
+	control := &fakePrewarmControl{
+		workers:   []*ateapipb.Worker{prewarmWorker("workspaces", "gvisor", nil)},
+		templates: []*ateapipb.ActorTemplate{unused, used},
+		actors:    []*ateapipb.Actor{{ActorTemplate: &ateapipb.ObjectRef{Atespace: "used", Name: "same-name"}}},
+	}
+	p := &templateImagePrewarmer{control: control, pools: prewarmPools("workspaces")}
+	got, err := p.wanted(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"registry/z-used@sha256:1", "registry/a-unused@sha256:2"}; !slices.Equal(got, want) {
+		t.Errorf("wanted = %v, want %v", got, want)
 	}
 }

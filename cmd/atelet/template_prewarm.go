@@ -15,6 +15,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -30,8 +31,12 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
-var templateImagePrewarmInterval = pflag.Duration("template-image-prewarm-interval", time.Minute,
-	"How often to pull the container images of ActorTemplates that can run on this node's workers into the image cache, so an actor's first start on the node does not wait for its image. 0 disables.")
+var (
+	templateImagePrewarmInterval = pflag.Duration("template-image-prewarm-interval", time.Minute,
+		"How often to refresh the priority images for this node's workers in the image cache. 0 disables.")
+	templateImagePrewarmMaxImages = pflag.Int("template-image-prewarm-max-images", 4,
+		"Maximum number of images to keep warm, prioritizing actors on this node, recent actor activity, then recently created templates. 0 disables.")
+)
 
 // templateImagePrewarmTimeout bounds pulling one image. Workspace-sized images
 // run to gigabytes; a timed-out pull is retried on the next pass. A var so
@@ -40,6 +45,7 @@ var templateImagePrewarmTimeout = 30 * time.Minute
 
 // templatePrewarmControl is the slice of the Control API the prewarmer reads.
 type templatePrewarmControl interface {
+	ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error)
 	ListWorkers(ctx context.Context, in *ateapipb.ListWorkersRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkersResponse, error)
 	ListActorTemplates(ctx context.Context, in *ateapipb.ListActorTemplatesRequest, opts ...grpc.CallOption) (*ateapipb.ListActorTemplatesResponse, error)
 }
@@ -50,10 +56,10 @@ type imageEnsurer interface {
 	EnsureImage(ctx context.Context, ref string) (*imagecache.Image, error)
 }
 
-// templateImagePrewarmer pulls the images of the ActorTemplates the scheduler
-// could place on this node's workers before an actor needs them. Pulls are
-// full, so without it the first actor of a template on a new node (one the
-// cluster autoscaler just added, say) waits minutes for a large image.
+// templateImagePrewarmer keeps a bounded working set of images warm before an
+// actor needs them. Local actors take priority, followed by recent actor
+// activity and recent compatible templates. Historical templates outside this
+// set cannot churn the cache or compete with foreground restores for I/O.
 //
 // Like the SandboxConfig prewarm it is purely a latency optimization: every
 // failure is logged and left to the pull inside an actor start, which remains
@@ -65,14 +71,10 @@ type templateImagePrewarmer struct {
 	// keyed by pod UID (newWorkerPoolFetcher). Scheduled pods count before
 	// they run, so a new node starts pulling while its workers start.
 	pools func(ctx context.Context) map[string]workerPoolRef
-	// pulled holds the refs this process has already ensured. They are not
-	// ensured again: the cache keeps them until eviction, and a repeated
-	// ensure would refresh their recency and shield them from it.
-	pulled map[string]bool
 }
 
 func startTemplateImagePrewarm(ctx context.Context, interval time.Duration, control templatePrewarmControl, images imageEnsurer, pools func(context.Context) map[string]workerPoolRef) {
-	if interval <= 0 {
+	if interval <= 0 || *templateImagePrewarmMaxImages <= 0 {
 		slog.InfoContext(ctx, "Template image prewarm disabled")
 		return
 	}
@@ -80,7 +82,7 @@ func startTemplateImagePrewarm(ctx context.Context, interval time.Duration, cont
 		slog.WarnContext(ctx, "NODE_NAME not set; template image prewarm disabled")
 		return
 	}
-	p := &templateImagePrewarmer{control: control, images: images, pools: pools, pulled: map[string]bool{}}
+	p := &templateImagePrewarmer{control: control, images: images, pools: pools}
 	go func() {
 		for {
 			p.pass(ctx)
@@ -94,8 +96,9 @@ func startTemplateImagePrewarm(ctx context.Context, interval time.Duration, cont
 	slog.InfoContext(ctx, "Template image prewarm started", slog.Duration("interval", interval))
 }
 
-// pass pulls, one at a time so prewarming never competes with itself for node
-// bandwidth, each wanted image this process has not pulled yet.
+// pass refreshes the bounded working set one image at a time. EnsureImage
+// touches cache-hit recency and re-pulls missing layers after eviction, so
+// selected images stay warm while unselected images can age out.
 func (p *templateImagePrewarmer) pass(ctx context.Context) {
 	refs, err := p.wanted(ctx)
 	if err != nil {
@@ -103,7 +106,7 @@ func (p *templateImagePrewarmer) pass(ctx context.Context) {
 		return
 	}
 	for _, ref := range refs {
-		if p.pulled[ref] || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			continue
 		}
 		start := time.Now()
@@ -114,7 +117,6 @@ func (p *templateImagePrewarmer) pass(ctx context.Context) {
 			slog.WarnContext(ctx, "Template image prewarm failed; retrying next pass", slog.String("image", ref), slog.Any("err", err))
 			continue
 		}
-		p.pulled[ref] = true
 		slog.InfoContext(ctx, "Template image prewarmed", slog.String("image", ref), slog.Duration("duration", time.Since(start)))
 	}
 }
@@ -126,14 +128,16 @@ type poolTraits struct {
 	labels       labels.Set
 }
 
-// wanted returns the container images, sorted and deduplicated, of every
-// ActorTemplate whose sandbox class and worker selector a WorkerPool with a
-// pod on this node satisfies: the templates whose actors the scheduler could
-// place here. A pool's traits come from any of its registered Workers, on any
-// node, so they are known before this node's own workers register.
+// wanted ranks distinct images of compatible templates by demand, then
+// limits prewarming to the hottest refs. Pool traits come from any registered
+// Worker in the pool, so a new node can prewarm before its workers register.
 func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
+	if *templateImagePrewarmMaxImages <= 0 {
+		return nil, nil
+	}
+	pods := p.pools(ctx)
 	local := map[workerPoolRef]bool{}
-	for _, pool := range p.pools(ctx) {
+	for _, pool := range pods {
 		local[pool] = true
 	}
 	if len(local) == 0 {
@@ -162,7 +166,45 @@ func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
 		return nil, nil
 	}
 
-	var refs []string
+	// Template refs include their atespace: names need not be globally unique.
+	type templateRef struct{ atespace, name string }
+	type rank struct {
+		priority int
+		lastUsed time.Time
+	}
+	compare := func(a, b rank) int {
+		if c := cmp.Compare(a.priority, b.priority); c != 0 {
+			return c
+		}
+		return a.lastUsed.Compare(b.lastUsed)
+	}
+	demand := map[templateRef]rank{}
+	actorsReq := &ateapipb.ListActorsRequest{}
+	for {
+		resp, err := p.control.ListActors(ctx, actorsReq)
+		if err != nil {
+			return nil, fmt.Errorf("while listing actors: %w", err)
+		}
+		for _, actor := range resp.GetActors() {
+			if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_DELETING {
+				continue
+			}
+			ref := actor.GetActorTemplate()
+			key := templateRef{ref.GetAtespace(), ref.GetName()}
+			r := rank{priority: 1, lastUsed: actor.GetMetadata().GetUpdateTime().AsTime()}
+			if _, local := pods[actor.GetStatus().GetWorkerAssignment().GetWorkerPodUid()]; local {
+				r.priority = 2
+			}
+			if prev, ok := demand[key]; !ok || compare(r, prev) > 0 {
+				demand[key] = r
+			}
+		}
+		if resp.GetNextPageToken() == "" {
+			break
+		}
+		actorsReq.PageToken = resp.GetNextPageToken()
+	}
+	ranked := map[string]rank{}
 	templatesReq := &ateapipb.ListActorTemplatesRequest{}
 	for {
 		resp, err := p.control.ListActorTemplates(ctx, templatesReq)
@@ -173,9 +215,18 @@ func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
 			if !placeable(tmpl, traits) {
 				continue
 			}
+			md := tmpl.GetMetadata()
+			r, used := demand[templateRef{md.GetAtespace(), md.GetName()}]
+			if !used {
+				r.lastUsed = md.GetCreateTime().AsTime()
+			}
 			for _, c := range tmpl.GetContainers() {
-				if c.GetImage() != "" {
-					refs = append(refs, c.GetImage())
+				ref := c.GetImage()
+				if ref == "" {
+					continue
+				}
+				if prev, ok := ranked[ref]; !ok || compare(r, prev) > 0 {
+					ranked[ref] = r
 				}
 			}
 		}
@@ -184,8 +235,20 @@ func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
 		}
 		templatesReq.PageToken = resp.GetNextPageToken()
 	}
-	slices.Sort(refs)
-	return slices.Compact(refs), nil
+	refs := make([]string, 0, len(ranked))
+	for ref := range ranked {
+		refs = append(refs, ref)
+	}
+	slices.SortFunc(refs, func(a, b string) int {
+		if c := compare(ranked[b], ranked[a]); c != 0 {
+			return c
+		}
+		return cmp.Compare(a, b)
+	})
+	if len(refs) > *templateImagePrewarmMaxImages {
+		refs = refs[:*templateImagePrewarmMaxImages]
+	}
+	return refs, nil
 }
 
 // placeable reports whether any of the pools can host the template's actors,
