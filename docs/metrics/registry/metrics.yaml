@@ -426,6 +426,42 @@ groups:
               value: error
               brief: The attempt failed. Only this outcome has an error.type key.
 
+  - id: registry.ate.actor.redrive
+    type: attribute_group
+    brief: The labels of an attempt to finish an actor operation that no workflow was running.
+    attributes:
+      - id: ate.actor.redrive.outcome
+        stability: development
+        brief: The result of one attempt to finish an operation that ateapi left half done.
+        type:
+          members:
+            - id: completed
+              stability: development
+              value: completed
+              brief: The operation ran to the end. The actor is in the state it was going to.
+            - id: crashed
+              stability: development
+              value: crashed
+              brief: >
+                The operation could not be finished, and the actor is in the
+                CRASHED state. RevertActor returns it to its last durable
+                snapshot. ateapi does not try again.
+            - id: failed
+              stability: development
+              value: failed
+              brief: The attempt hit an error and left the actor as it was. ateapi tries again after a delay that grows with each failure.
+            - id: busy
+              stability: development
+              value: busy
+              brief: A workflow holds the lease of the actor. ateapi left the actor alone.
+            - id: settled
+              stability: development
+              value: settled
+              brief: >
+                The actor was not waiting for the operation when the attempt
+                looked: the operation finished, the actor was written to again,
+                or the actor is gone or replaced.
+
   - id: registry.ate.router
     type: attribute_group
     brief: The labels of the atenet router.
@@ -764,6 +800,37 @@ groups:
       - ref: ate.workerpool.name
         requirement_level:
           conditionally_required: The actor has a worker.
+
+  - id: metric.ate.actor.redrives
+    type: metric
+    metric_name: ate.actor.redrives
+    instrument: counter
+    unit: "{redrive}"
+    stability: development
+    brief: >
+      The number of attempts to finish an actor operation that no workflow was
+      running, by operation and outcome.
+    note: >
+      A workflow that stops before it ends (ateapi restarts, crashes, or loses
+      its caller) leaves the actor in SUSPENDING, PAUSING, REVERTING or
+      DELETING. A re-drive runs the workflow again. ate.actor.operation.name is
+      the operation that finishes the state of the actor. A busy or settled
+      attempt did nothing to the actor. The outcome failed repeats with a delay
+      that grows to 30 minutes, thus a series of failed attempts for a few
+      actors means that something on a node blocks them. The outcome crashed
+      is also counted on ate.actor.crashes. The actors that no re-drive
+      finishes (an actor in RESUMING) are not counted.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        golden_signals: [errors, traffic]
+        code_anchor: cmd/ateapi/internal/controlapi/metrics.go
+        cuj: Some actors stay in a transitional state after ateapi restarts. Does ateapi finish them?
+    attributes:
+      - ref: ate.actor.operation.name
+        requirement_level: required
+      - ref: ate.actor.redrive.outcome
+        requirement_level: required
 
   - id: metric.ate.workerpool.workers
     type: metric

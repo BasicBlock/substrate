@@ -152,8 +152,11 @@ func ActorStateValue(state ateapipb.ActorState) string {
 // ImageCacheOutcomeKey is rooted at the subsystem, not under actor: the layer
 // pool is node state every actor shares. For the same reason it is the only
 // ate.* label on its counter.
+// ActorRedriveOutcomeKey is the result of one attempt to finish an operation a
+// workflow left half done.
 const (
 	ActorOperationNameKey  = attribute.Key("ate.actor.operation.name")
+	ActorRedriveOutcomeKey = attribute.Key("ate.actor.redrive.outcome")
 	WorkerPoolNamespaceKey = attribute.Key("ate.workerpool.namespace")
 	WorkerPoolNameKey      = attribute.Key("ate.workerpool.name")
 	WorkerStateKey         = attribute.Key("ate.worker.state")
@@ -300,6 +303,21 @@ func NormalizeOperationName(op string) string {
 	}
 	return OperationUnknown
 }
+
+// Values for ActorRedriveOutcomeKey, the result of one attempt to finish an
+// operation that no workflow was running. Completed is the only outcome that
+// moved the actor to the state the operation was heading for. Crashed means
+// the actor could not be brought there and is CRASHED instead, which
+// RevertActor recovers. Failed means the attempt hit an error and ateapi tries
+// again later. Busy means a workflow holds the actor's lease, and Settled means
+// the actor was no longer waiting to be finished when the attempt looked.
+const (
+	RedriveOutcomeCompleted = "completed"
+	RedriveOutcomeCrashed   = "crashed"
+	RedriveOutcomeFailed    = "failed"
+	RedriveOutcomeBusy      = "busy"
+	RedriveOutcomeSettled   = "settled"
+)
 
 // Values for SchedulerOutcomeKey. NoCapacity is a capacity signal, not a
 // failure, so it is a distinct outcome rather than an error.type value; only the
