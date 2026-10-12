@@ -83,6 +83,12 @@ func ValidateRevertActorRequest(ctx context.Context, req *ateapipb.RevertActorRe
 	return Validate_RevertActorRequest(ctx, op, nil, req, nil)
 }
 
+func ValidateDropSnapshotMemoryRequest(ctx context.Context, req *ateapipb.DropSnapshotMemoryRequest) field.ErrorList {
+	// Call the generated validation.
+	op := operation.Operation{Type: operation.Create}
+	return Validate_DropSnapshotMemoryRequest(ctx, op, nil, req, nil)
+}
+
 func ValidateMintActorJWTRequest(ctx context.Context, req *ateapipb.MintActorJWTRequest) field.ErrorList {
 	// Call the generated validation.
 	op := operation.Operation{Type: operation.Create}

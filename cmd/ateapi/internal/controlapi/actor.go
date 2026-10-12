@@ -548,6 +548,27 @@ func (s *RPCService) RevertActor(ctx context.Context, req *ateapipb.RevertActorR
 	return &ateapipb.RevertActorResponse{Actor: actor}, nil
 }
 
+func (s *RPCService) DropSnapshotMemory(ctx context.Context, req *ateapipb.DropSnapshotMemoryRequest) (*ateapipb.DropSnapshotMemoryResponse, error) {
+	if errs := apivalidation.ValidateDropSnapshotMemoryRequest(ctx, req); len(errs) > 0 {
+		return nil, resources.ToAPIError(errs)
+	}
+	actorRef := resources.ActorRefFromObjectRef(req.GetActor())
+	setSpanActorRefAttributes(ctx, actorRef)
+
+	actor, err := s.actorWorkflow.DropSnapshotMemory(ctx, actorRef)
+	if err != nil {
+		if errors.Is(err, store.ErrVersionConflict) {
+			return nil, apierror.Aborted("concurrent update conflict, please retry")
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, apierror.NotFound("Actor %s not found", actorRef)
+		}
+		return nil, err
+	}
+	setSpanActorAttributes(ctx, actor)
+	return &ateapipb.DropSnapshotMemoryResponse{Actor: actor}, nil
+}
+
 func (s *RPCService) MintActorJWT(ctx context.Context, req *ateapipb.MintActorJWTRequest) (*ateapipb.MintActorJWTResponse, error) {
 	if errs := apivalidation.ValidateMintActorJWTRequest(ctx, req); len(errs) > 0 {
 		return nil, apierror.InvalidArgument("%v", errs.ToAggregate())

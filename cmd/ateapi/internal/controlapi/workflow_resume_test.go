@@ -1040,6 +1040,10 @@ type capturingAtelet struct {
 	// restoredFidelity is echoed on every Restore response, so a test can
 	// simulate atelet reporting a restore at a lower fidelity than requested.
 	restoredFidelity ateletpb.SnapshotFidelity
+	// dropSnapshotMemory is the last DropSnapshotMemory request, and
+	// dropSnapshotMemoryErr, when set, what the RPC fails with.
+	dropSnapshotMemory    *ateletpb.DropSnapshotMemoryRequest
+	dropSnapshotMemoryErr error
 }
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
@@ -1061,6 +1065,27 @@ func (f *capturingAtelet) Checkpoint(ctx context.Context, req *ateletpb.Checkpoi
 	defer f.mu.Unlock()
 	f.checkpoint = proto.Clone(req).(*ateletpb.CheckpointRequest)
 	return &ateletpb.CheckpointResponse{}, nil
+}
+
+func (f *capturingAtelet) DropSnapshotMemory(ctx context.Context, req *ateletpb.DropSnapshotMemoryRequest) (*ateletpb.DropSnapshotMemoryResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropSnapshotMemory = proto.Clone(req).(*ateletpb.DropSnapshotMemoryRequest)
+	if f.dropSnapshotMemoryErr != nil {
+		return nil, f.dropSnapshotMemoryErr
+	}
+	return &ateletpb.DropSnapshotMemoryResponse{}, nil
+}
+
+// droppedSnapshotMemory returns the last DropSnapshotMemory request, nil if
+// the RPC was never called.
+func (f *capturingAtelet) droppedSnapshotMemory() *ateletpb.DropSnapshotMemoryRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dropSnapshotMemory == nil {
+		return nil
+	}
+	return proto.Clone(f.dropSnapshotMemory).(*ateletpb.DropSnapshotMemoryRequest)
 }
 
 func (f *capturingAtelet) checkpointRequest() *ateletpb.CheckpointRequest {

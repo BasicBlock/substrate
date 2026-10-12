@@ -163,6 +163,10 @@ groups:
               stability: development
               value: revert
               brief: ateapi discarded the actor's execution and returned it to its existing snapshot.
+            - id: drop_snapshot_memory
+              stability: development
+              value: drop_snapshot_memory
+              brief: ateapi downgraded the actor's stored MEMORY snapshot to ROOTFS, keeping its files and emptying its memory objects.
             - id: unknown
               stability: development
               value: unknown

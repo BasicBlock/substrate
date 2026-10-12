@@ -287,6 +287,9 @@ const (
 	OperationPause   = "pause"
 	OperationDelete  = "delete"
 	OperationRevert  = "revert"
+
+	OperationDropSnapshotMemory = "drop_snapshot_memory"
+
 	OperationUnknown = "unknown"
 )
 
@@ -298,6 +301,7 @@ var AllOperations = []string{
 	OperationPause,
 	OperationDelete,
 	OperationRevert,
+	OperationDropSnapshotMemory,
 }
 
 // NormalizeOperationName ensures op is one of the bounded lifecycle operations.
