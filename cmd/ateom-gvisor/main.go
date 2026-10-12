@@ -573,11 +573,13 @@ func validateActorDirs(actorDirs *ateompb.ActorDirs) error {
 	return nil
 }
 
-// supportedFidelities are the snapshot fidelities this runtime serves. gVisor
-// keeps rootfs changes inside its memory checkpoint, so it cannot capture
-// ROOTFS without MEMORY.
+// supportedFidelities are the snapshot fidelities this runtime serves. ROOTFS
+// is restore-only: the root filesystem image a MEMORY capture takes beside its
+// memory image (runsc fscheckpoint), cold-booted when the memory image cannot
+// be restored. CheckpointWorkload captures only VOLUMES and MEMORY.
 var supportedFidelities = []ateompb.SnapshotFidelity{
 	ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+	ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
 	ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 }
 
@@ -784,6 +786,9 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 
 	containers := req.GetSpec().GetContainers()
 	durablePaths := durableFSCheckpointPaths(containers)
+	// rootfsFiles are the root filesystem image a MEMORY capture takes beside
+	// the memory image: the ROOTFS subset a failed memory restore falls back to.
+	var rootfsFiles []string
 	switch fidelity {
 	case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
 		if len(durablePaths) == 0 {
@@ -795,6 +800,30 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			return nil, fmt.Errorf("while checkpointing durable-dir volumes: %w", err)
 		}
 	case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		// Capture the root filesystem beside the memory image, at the same
+		// paused instant, so a restore that cannot use the memory image can
+		// cold-boot from the files instead: pause, fscheckpoint with
+		// -leave-running so the sandbox survives for the checkpoint, then the
+		// memory checkpoint, which ends the session whether or not the root
+		// filesystem capture worked. The capture is best-effort: fscheckpoint
+		// is experimental in gVisor, and its failure must not turn a working
+		// memory checkpoint into a failed suspend. A snapshot without it
+		// simply has no root filesystem fallback. Nor does one with durable-dir
+		// volumes: their fs/ image and the root filesystem's would both need
+		// runsc's one --fs-restore-image-path.
+		if len(durablePaths) == 0 {
+			err := rcmd.cmdPause(ctx, ocispec.PauseContainer)
+			timing.pause = lap(&tLast)
+			if err != nil {
+				return nil, fmt.Errorf("while pausing pause container: %w", err)
+			}
+			rootfsFiles, err = captureRootfs(ctx, rcmd, checkpointPath, containers, true /* leaveRunning */)
+			timing.fsCheckpoint = lap(&tLast)
+			if err != nil {
+				slog.WarnContext(ctx, "Failed to capture the root filesystem beside the memory checkpoint; continuing without it",
+					slog.String("actor", attribution.Ref.String()), slog.Any("err", err))
+			}
+		}
 		// Checkpoint pause container (root of the sandbox), splitting durable-dir
 		// volumes into <checkpointPath>/fs when present.
 		err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath, durablePaths)
@@ -829,7 +858,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 
-	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles}, nil
+	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles, RootfsSnapshotFiles: rootfsFiles}, nil
 }
 
 // listSnapshotFiles returns the (relative) names of regular files directly under
@@ -1025,11 +1054,39 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("while composing pause rootfs: %w", err)
 	}
 
+	var fsRestorePath string
+	if fidelity == ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+		if restoreArgs != nil {
+			return nil, fmt.Errorf("a ROOTFS restore cannot also restore durable-dir volumes")
+		}
+		fsRestorePath, err = stageRootfsRestore(checkpointDir)
+		if err != nil {
+			return nil, fmt.Errorf("while staging the root filesystem checkpoint to restore: %w", err)
+		}
+	}
+
 	switch fidelity {
 	case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
 		// Create and start pause container (cold boot with durable-dir volumes restored from fs/)
 		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
 		err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, restoreArgs)
+		timing.pauseCreate = lap(&tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while creating pause container: %w", err)
+		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
+		err = rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer)
+		timing.pauseRestore = lap(&tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while starting pause container: %w", err)
+		}
+	case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
+		// Create the pause container with the captured root filesystem and start
+		// it: a cold boot, not a runsc restore. runsc takes the image only for
+		// the sandbox's root container; it restores each application container's
+		// paths, by container name, as that container is created.
+		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
+		err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, []string{"--fs-restore-image-path", fsRestorePath})
 		timing.pauseCreate = lap(&tLast)
 		if err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
@@ -1080,7 +1137,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
 		}
 		switch fidelity {
-		case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
+		case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
 			err = rcmd.cmdStart(ctx, pw, ac.GetName())
 			timing.appRestore += lap(&tLast)
 			if err != nil {

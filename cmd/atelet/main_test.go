@@ -339,14 +339,32 @@ func TestSnapshotManifestRejectsDataFileNotInSnapshotFiles(t *testing.T) {
 	}
 }
 
+func TestSnapshotManifestRejectsRootfsFileNotInSnapshotFiles(t *testing.T) {
+	manifest, err := json.Marshal(sandboxAssetsRecord{
+		SandboxClass:        "gvisor",
+		PauseImage:          testPauseImage,
+		SnapshotFiles:       []string{"checkpoint.img"},
+		RootfsSnapshotFiles: []string{"rootfs.pages.img"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unmarshalSandboxRecord(manifest); err == nil {
+		t.Fatal("unmarshalSandboxRecord() accepted a rootfs file that is not one of the snapshot files")
+	}
+}
+
 func TestCheckpointSnapshotFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		files    []string
 		data     []string
+		rootfs   []string
 		required bool
 		wantErr  bool
 	}{
+		{name: "rootfs subset", files: []string{"checkpoint.img", "rootfs.pages.img", "data.tar"}, data: []string{"data.tar"}, rootfs: []string{"rootfs.pages.img", "data.tar"}, required: true},
+		{name: "rootfs not a snapshot file", files: []string{"checkpoint.img"}, rootfs: []string{"rootfs.pages.img"}, required: true, wantErr: true},
 		{name: "required and present", files: []string{"checkpoint.img"}, required: true},
 		{name: "data subset", files: []string{"checkpoint.img", "data.tar"}, data: []string{"data.tar"}, required: true},
 		{name: "fs subdir data subset", files: []string{"checkpoint.img", "fs/fscheckpoint.pb", "fs/multitar.img"}, data: []string{"fs/fscheckpoint.pb", "fs/multitar.img"}, required: true},
@@ -361,12 +379,15 @@ func TestCheckpointSnapshotFiles(t *testing.T) {
 		{name: "manifest name", files: []string{"checkpoint.img", sandboxManifestName}, required: true, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			files, data, err := checkpointSnapshotFiles(&ateompb.CheckpointWorkloadResponse{SnapshotFiles: tc.files, DataSnapshotFiles: tc.data}, tc.required)
+			files, data, rootfs, err := checkpointSnapshotFiles(&ateompb.CheckpointWorkloadResponse{SnapshotFiles: tc.files, DataSnapshotFiles: tc.data, RootfsSnapshotFiles: tc.rootfs}, tc.required)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("checkpointSnapshotFiles() = %v, %v, %v; wantErr %v", files, data, err, tc.wantErr)
+				t.Fatalf("checkpointSnapshotFiles() = %v, %v, %v, %v; wantErr %v", files, data, rootfs, err, tc.wantErr)
 			}
 			if err == nil && !slices.Equal(data, tc.data) {
 				t.Errorf("data files = %v, want %v", data, tc.data)
+			}
+			if err == nil && !slices.Equal(rootfs, tc.rootfs) {
+				t.Errorf("rootfs files = %v, want %v", rootfs, tc.rootfs)
 			}
 		})
 	}

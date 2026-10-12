@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -32,6 +33,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -69,6 +72,16 @@ type fakeAteom struct {
 	// fidelities records the fidelity each checkpoint or restore arrived
 	// with, by RPC name.
 	fidelities map[string]ateompb.SnapshotFidelity
+	// rootfsFiles are the names in snapshotFiles that a checkpoint reports as
+	// restoring ROOTFS fidelity on their own.
+	rootfsFiles []string
+	// failRestoreFidelity, when set, makes RestoreWorkload fail for that one
+	// fidelity and succeed for any other, so a test can simulate a MEMORY
+	// restore failing (an incompatible CPU, say) and watch atelet fall back.
+	failRestoreFidelity ateompb.SnapshotFidelity
+	// restoreFidelities records, in order, every fidelity RestoreWorkload was
+	// called with, so a test can tell a fallback from a first-try success.
+	restoreFidelities []ateompb.SnapshotFidelity
 }
 
 func (f *fakeAteom) recordFidelity(rpc string, fidelity ateompb.SnapshotFidelity) {
@@ -101,13 +114,17 @@ func (f *fakeAteom) CheckpointWorkload(_ context.Context, req *ateompb.Checkpoin
 		}
 		names = append(names, name)
 	}
-	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: names}, nil
+	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: names, RootfsSnapshotFiles: f.rootfsFiles}, nil
 }
 
 func (f *fakeAteom) RestoreWorkload(_ context.Context, req *ateompb.RestoreWorkloadRequest) (*ateompb.RestoreWorkloadResponse, error) {
 	f.recordActorDirs("RestoreWorkload", req.GetActorDirs())
 	f.recordFidelity("RestoreWorkload", req.GetFidelity())
 	f.preserveRestoreDir = req.GetPreserveRestoreDir()
+	f.restoreFidelities = append(f.restoreFidelities, req.GetFidelity())
+	if f.failRestoreFidelity != ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED && req.GetFidelity() == f.failRestoreFidelity {
+		return nil, status.Error(codes.Internal, "simulated runsc restore failure (an incompatible CPU feature set, say)")
+	}
 	dir := req.GetActorDirs().GetRestoreDir()
 	f.restored = map[string]string{}
 	for name := range f.snapshotFiles {
@@ -771,5 +788,154 @@ func TestTerminateWithoutSandboxRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(actorDir); !os.IsNotExist(err) {
 		t.Errorf("actor dir survived terminate (stat err = %v)", err)
+	}
+}
+
+// pausedActorForRestore runs an actor through Run and a local MEMORY
+// Checkpoint (a pause) against ateom, and returns what a Restore of it needs.
+func pausedActorForRestore(t *testing.T, ateom *fakeAteom) (s *AteomHerder, restore *ateletpb.RestoreRequest) {
+	t.Helper()
+	useTempNodeDirs(t)
+	ctx := t.Context()
+
+	const (
+		atespace     = "ate-demo"
+		actorName    = "counter"
+		actorUID     = "actor-uid-1"
+		workerPodUID = "worker-pod-uid-1"
+		snapshotName = "pause-snap-1"
+	)
+	serveFakeAteom(t, ateom)
+
+	host := imageVolumeTestRegistry(t)
+	image := host + "/actor:v1"
+	pushTestImage(t, image, singleFileLayer(t, "bin/app", "app"))
+
+	runsc := []byte("runsc binary")
+	s = &AteomHerder{
+		ateomDialer:       newAteomDialer(1),
+		imageCache:        newImageVolumeStore(t),
+		anonGCSClient:     fakeObjectStorage{data: runsc},
+		systemInfoVolumes: newSystemInfoVolumeRefresher(nil, nil),
+	}
+	sandboxAssets := &ateletpb.SandboxAssets{
+		SandboxClass: "gvisor",
+		PauseImage:   image,
+		Assets: map[string]*ateletpb.ArchAssets{
+			runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
+				runscAssetName: {
+					Url:    "gs://test-bucket/runsc",
+					Sha256: fmt.Sprintf("%x", sha256.Sum256(runsc)),
+				},
+			}},
+		},
+	}
+	spec := &ateletpb.WorkloadSpec{
+		Containers: []*ateletpb.Container{{Name: "app", Image: image, Command: []string{"/bin/app"}}},
+	}
+	if _, err := s.Run(ctx, &ateletpb.RunRequest{
+		Atespace: atespace, ActorName: actorName, ActorUid: actorUID,
+		ActorTemplateAtespace: "default", ActorTemplateName: "counter",
+		WorkerPodUid: workerPodUID, SandboxAssets: sandboxAssets, Spec: spec,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := s.Checkpoint(ctx, &ateletpb.CheckpointRequest{
+		Atespace: atespace, ActorName: actorName, ActorUid: actorUID,
+		ActorTemplateAtespace: "default", ActorTemplateName: "counter",
+		WorkerPodUid: workerPodUID, Spec: spec,
+		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		Type:     ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
+		Config: &ateletpb.CheckpointRequest_LocalConfig{
+			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		},
+	}); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	return s, &ateletpb.RestoreRequest{
+		Atespace: atespace, ActorName: actorName, ActorUid: actorUID,
+		ActorTemplateAtespace: "default", ActorTemplateName: "counter",
+		WorkerPodUid: workerPodUID, SandboxAssets: sandboxAssets, Spec: spec,
+		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		Type:     ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
+		Config: &ateletpb.RestoreRequest_LocalConfig{
+			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		},
+	}
+}
+
+// A pause whose snapshot holds a root filesystem restores from it when the
+// memory restore fails, instead of failing the resume, and says so.
+func TestRestoreFallsBackToRootfsWhenMemoryRestoreFails(t *testing.T) {
+	ateom := &fakeAteom{
+		snapshotFiles:       map[string]string{"checkpoint.img": "guest-memory", "rootfs.pages.img": "rootfs"},
+		rootfsFiles:         []string{"rootfs.pages.img"},
+		failRestoreFidelity: ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+	}
+	s, restore := pausedActorForRestore(t, ateom)
+
+	resp, err := s.Restore(t.Context(), restore)
+	if err != nil {
+		t.Fatalf("Restore: %v, want the ROOTFS fallback to succeed", err)
+	}
+	if got := resp.GetRestoredFidelity(); got != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+		t.Errorf("RestoredFidelity = %v, want ROOTFS", got)
+	}
+	want := []ateompb.SnapshotFidelity{ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS}
+	if !slices.Equal(ateom.restoreFidelities, want) {
+		t.Errorf("ateom.RestoreWorkload fidelities = %v, want %v", ateom.restoreFidelities, want)
+	}
+}
+
+func TestRestoreDoesNotFallBackWhenItCannotHelp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ateom *fakeAteom
+	}{
+		{
+			name: "the snapshot holds no root filesystem",
+			ateom: &fakeAteom{
+				snapshotFiles:       map[string]string{"checkpoint.img": "guest-memory"},
+				failRestoreFidelity: ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, restore := pausedActorForRestore(t, tc.ateom)
+			if _, err := s.Restore(t.Context(), restore); err == nil {
+				t.Fatal("Restore succeeded, want the MEMORY failure")
+			}
+			if want := []ateompb.SnapshotFidelity{ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}; !slices.Equal(tc.ateom.restoreFidelities, want) {
+				t.Errorf("ateom.RestoreWorkload fidelities = %v, want only %v", tc.ateom.restoreFidelities, want)
+			}
+		})
+	}
+}
+
+func TestCanFallBackToRootfs(t *testing.T) {
+	withRootfs := &sandboxAssetsRecord{RootfsSnapshotFiles: []string{"rootfs.pages.img"}}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	internalErr := status.Error(codes.Internal, "runsc restore failed")
+	for _, tc := range []struct {
+		name     string
+		ctx      context.Context
+		fidelity ateletpb.SnapshotFidelity
+		rec      *sandboxAssetsRecord
+		err      error
+		want     bool
+	}{
+		{"memory restore failed", context.Background(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, withRootfs, internalErr, true},
+		{"no root filesystem in the snapshot", context.Background(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, &sandboxAssetsRecord{}, internalErr, false},
+		{"a ROOTFS restore has nothing lower", context.Background(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, withRootfs, internalErr, false},
+		{"a draining ateom is retried elsewhere", context.Background(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, withRootfs, status.Error(codes.Unavailable, "worker draining"), false},
+		{"the caller gave up", cancelled, ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, withRootfs, internalErr, false},
+		{"the ateom call timed out", context.Background(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, withRootfs, status.Error(codes.DeadlineExceeded, "slow"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canFallBackToRootfs(tc.ctx, tc.fidelity, tc.rec, tc.err); got != tc.want {
+				t.Errorf("canFallBackToRootfs() = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }

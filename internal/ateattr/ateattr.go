@@ -153,7 +153,8 @@ func ActorStateValue(state ateapipb.ActorState) string {
 // The snapshot keys are orthogonal: kind is which snapshot, scope is what
 // content it covers, and phase is which step of the operation an observation
 // timed. Naming one image within a snapshot is the registry's file.name, not an
-// ate.* key of its own.
+// ate.* key of its own. RestoreFallbackKey is present only on a restore that
+// fell back to a lower fidelity.
 // ImageCacheOutcomeKey is rooted at the subsystem, not under actor: the layer
 // pool is node state every actor shares. For the same reason it is the only
 // ate.* label on its counter.
@@ -171,6 +172,7 @@ const (
 	RouterResumeKey        = attribute.Key("ate.router.resume")
 	RouterOutcomeKey       = attribute.Key("ate.router.outcome")
 	StatsSourceKey         = attribute.Key("ate.stats.source")
+	RestoreFallbackKey     = attribute.Key("ate.restore.fallback")
 )
 
 // Keys of the actor usage record. Logs only: the measurements are unbounded and
@@ -353,6 +355,13 @@ func SnapshotFidelityValue(fidelity ateletpb.SnapshotFidelity) string {
 		return SnapshotFidelityUnknown
 	}
 }
+
+// Values for RestoreFallbackKey, present only on a restore that fell back (its
+// absence, not a "none" value, means the normal path ran, so the label set of
+// the common case does not widen). The only fallback today is a MEMORY restore
+// that failed and was recovered by a cold boot from the snapshot's root
+// filesystem image.
+const RestoreFallbackMemoryToRootfs = "memory_to_rootfs"
 
 // Values for SnapshotPhaseKey. Phases overlap (the download runs concurrently
 // with the asset fetch and OCI unpack), so they are independent observations,

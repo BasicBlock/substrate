@@ -3211,9 +3211,13 @@ func (*RestoreRequest_LocalConfig) isRestoreRequest_Config() {}
 func (*RestoreRequest_ExternalConfig) isRestoreRequest_Config() {}
 
 type RestoreResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// restored_fidelity is the fidelity the actor was restored at. It is lower
+	// than the request's when a MEMORY restore failed and atelet cold-booted the
+	// actor from the snapshot's root filesystem instead.
+	RestoredFidelity SnapshotFidelity `protobuf:"varint,1,opt,name=restored_fidelity,json=restoredFidelity,proto3,enum=atelet.SnapshotFidelity" json:"restored_fidelity,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RestoreResponse) Reset() {
@@ -3244,6 +3248,13 @@ func (x *RestoreResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RestoreResponse.ProtoReflect.Descriptor instead.
 func (*RestoreResponse) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *RestoreResponse) GetRestoredFidelity() SnapshotFidelity {
+	if x != nil {
+		return x.RestoredFidelity
+	}
+	return SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 }
 
 var File_atelet_proto protoreflect.FileDescriptor
@@ -3463,8 +3474,9 @@ const file_atelet_proto_rawDesc = "" +
 	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x12<\n" +
 	"\x0esandbox_assets\x18\x10 \x01(\v2\x15.atelet.SandboxAssetsR\rsandboxAssetsB\b\n" +
 	"\x06configB\x11\n" +
-	"\x0f_egress_gateway\"\x11\n" +
-	"\x0fRestoreResponse*\x9a\x01\n" +
+	"\x0f_egress_gateway\"X\n" +
+	"\x0fRestoreResponse\x12E\n" +
+	"\x11restored_fidelity\x18\x01 \x01(\x0e2\x18.atelet.SnapshotFidelityR\x10restoredFidelity*\x9a\x01\n" +
 	"\x12ActorMetadataField\x12$\n" +
 	" ACTOR_METADATA_FIELD_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ACTOR_METADATA_FIELD_NAME\x10\x01\x12!\n" +
@@ -3608,29 +3620,30 @@ var file_atelet_proto_depIdxs = []int32{
 	2,  // 43: atelet.RestoreRequest.fidelity:type_name -> atelet.SnapshotFidelity
 	18, // 44: atelet.RestoreRequest.egress_gateway:type_name -> atelet.EgressGateway
 	21, // 45: atelet.RestoreRequest.sandbox_assets:type_name -> atelet.SandboxAssets
-	19, // 46: atelet.ArchAssets.FilesEntry.value:type_name -> atelet.AssetFile
-	20, // 47: atelet.SandboxAssets.AssetsEntry.value:type_name -> atelet.ArchAssets
-	13, // 48: atelet.AteomSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
-	3,  // 49: atelet.AteomSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
-	11, // 50: atelet.AteomSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
-	17, // 51: atelet.AteomHerder.Run:input_type -> atelet.RunRequest
-	44, // 52: atelet.AteomHerder.Checkpoint:input_type -> atelet.CheckpointRequest
-	48, // 53: atelet.AteomHerder.Restore:input_type -> atelet.RestoreRequest
-	46, // 54: atelet.AteomHerder.UploadPausedCheckpoint:input_type -> atelet.UploadPausedCheckpointRequest
-	15, // 55: atelet.AteomHerder.Terminate:input_type -> atelet.TerminateRequest
-	14, // 56: atelet.AteomSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
-	10, // 57: atelet.AteomSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
-	12, // 58: atelet.AteomSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
-	40, // 59: atelet.AteomHerder.Run:output_type -> atelet.RunResponse
-	45, // 60: atelet.AteomHerder.Checkpoint:output_type -> atelet.CheckpointResponse
-	49, // 61: atelet.AteomHerder.Restore:output_type -> atelet.RestoreResponse
-	47, // 62: atelet.AteomHerder.UploadPausedCheckpoint:output_type -> atelet.UploadPausedCheckpointResponse
-	16, // 63: atelet.AteomHerder.Terminate:output_type -> atelet.TerminateResponse
-	56, // [56:64] is the sub-list for method output_type
-	48, // [48:56] is the sub-list for method input_type
-	48, // [48:48] is the sub-list for extension type_name
-	48, // [48:48] is the sub-list for extension extendee
-	0,  // [0:48] is the sub-list for field type_name
+	2,  // 46: atelet.RestoreResponse.restored_fidelity:type_name -> atelet.SnapshotFidelity
+	19, // 47: atelet.ArchAssets.FilesEntry.value:type_name -> atelet.AssetFile
+	20, // 48: atelet.SandboxAssets.AssetsEntry.value:type_name -> atelet.ArchAssets
+	13, // 49: atelet.AteomSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
+	3,  // 50: atelet.AteomSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
+	11, // 51: atelet.AteomSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
+	17, // 52: atelet.AteomHerder.Run:input_type -> atelet.RunRequest
+	44, // 53: atelet.AteomHerder.Checkpoint:input_type -> atelet.CheckpointRequest
+	48, // 54: atelet.AteomHerder.Restore:input_type -> atelet.RestoreRequest
+	46, // 55: atelet.AteomHerder.UploadPausedCheckpoint:input_type -> atelet.UploadPausedCheckpointRequest
+	15, // 56: atelet.AteomHerder.Terminate:input_type -> atelet.TerminateRequest
+	14, // 57: atelet.AteomSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
+	10, // 58: atelet.AteomSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
+	12, // 59: atelet.AteomSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
+	40, // 60: atelet.AteomHerder.Run:output_type -> atelet.RunResponse
+	45, // 61: atelet.AteomHerder.Checkpoint:output_type -> atelet.CheckpointResponse
+	49, // 62: atelet.AteomHerder.Restore:output_type -> atelet.RestoreResponse
+	47, // 63: atelet.AteomHerder.UploadPausedCheckpoint:output_type -> atelet.UploadPausedCheckpointResponse
+	16, // 64: atelet.AteomHerder.Terminate:output_type -> atelet.TerminateResponse
+	57, // [57:65] is the sub-list for method output_type
+	49, // [49:57] is the sub-list for method input_type
+	49, // [49:49] is the sub-list for extension type_name
+	49, // [49:49] is the sub-list for extension extendee
+	0,  // [0:49] is the sub-list for field type_name
 }
 
 func init() { file_atelet_proto_init() }

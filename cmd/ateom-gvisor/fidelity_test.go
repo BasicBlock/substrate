@@ -27,9 +27,9 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 )
 
-// TestValidateFidelity pins what this runtime serves. gVisor keeps rootfs
-// changes inside its memory checkpoint, so ROOTFS is refused until it can
-// capture them on their own; the error names the levels it does serve.
+// TestValidateFidelity pins what this runtime serves: all three levels, ROOTFS
+// through runsc fscheckpoint. The error for anything else names the levels it
+// does serve.
 func TestValidateFidelity(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -38,7 +38,7 @@ func TestValidateFidelity(t *testing.T) {
 	}{
 		{"volumes", ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, false},
 		{"memory", ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, false},
-		{"rootfs is not served", ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, true},
+		{"rootfs", ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, false},
 		{"unspecified", ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED, true},
 		{"outside the enum", ateompb.SnapshotFidelity(99), true},
 	} {
@@ -52,18 +52,19 @@ func TestValidateFidelity(t *testing.T) {
 			}
 		})
 	}
-	err := validateFidelity(ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS)
-	for _, want := range []string{"SNAPSHOT_FIDELITY_VOLUMES", "SNAPSHOT_FIDELITY_MEMORY"} {
+	err := validateFidelity(ateompb.SnapshotFidelity(99))
+	for _, want := range []string{"SNAPSHOT_FIDELITY_VOLUMES", "SNAPSHOT_FIDELITY_ROOTFS", "SNAPSHOT_FIDELITY_MEMORY"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("rootfs rejection %q does not list %s as supported", err, want)
+			t.Errorf("rejection %q does not list %s as supported", err, want)
 		}
 	}
 }
 
-// TestRPCsRejectRootfsBeforeTouchingTheSandbox pins that a ROOTFS checkpoint
-// or restore fails validation up front, before the actor lock or any file
-// system work, so a misrouted request cannot leave the actor half-handled.
-func TestRPCsRejectRootfsBeforeTouchingTheSandbox(t *testing.T) {
+// TestRPCsRejectAnUnservedFidelityBeforeTouchingTheSandbox pins that a
+// checkpoint or restore at a fidelity this runtime does not serve fails
+// validation up front, before the actor lock or any file system work, so a
+// misrouted request cannot leave the actor half-handled.
+func TestRPCsRejectAnUnservedFidelityBeforeTouchingTheSandbox(t *testing.T) {
 	s := &AteomService{}
 	dirs := &ateompb.ActorDirs{
 		RootDir:                   "/node/actors/actor-a",
@@ -74,14 +75,14 @@ func TestRPCsRejectRootfsBeforeTouchingTheSandbox(t *testing.T) {
 		SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
 		VolumesDir:                "/node/actors/actor-a/volumes",
 	}
-	rootfs := ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+	unserved := ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 
-	_, err := s.CheckpointWorkload(context.Background(), &ateompb.CheckpointWorkloadRequest{ActorUid: "actor-a", ActorDirs: dirs, Fidelity: rootfs})
+	_, err := s.CheckpointWorkload(context.Background(), &ateompb.CheckpointWorkloadRequest{ActorUid: "actor-a", ActorDirs: dirs, Fidelity: unserved})
 	if apierror.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "fidelity") {
-		t.Errorf("CheckpointWorkload(ROOTFS) = %v, want InvalidArgument naming the fidelity", err)
+		t.Errorf("CheckpointWorkload(unserved) = %v, want InvalidArgument naming the fidelity", err)
 	}
-	_, err = s.RestoreWorkload(context.Background(), &ateompb.RestoreWorkloadRequest{ActorUid: "actor-a", ActorDirs: dirs, Fidelity: rootfs})
+	_, err = s.RestoreWorkload(context.Background(), &ateompb.RestoreWorkloadRequest{ActorUid: "actor-a", ActorDirs: dirs, Fidelity: unserved})
 	if apierror.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "fidelity") {
-		t.Errorf("RestoreWorkload(ROOTFS) = %v, want InvalidArgument naming the fidelity", err)
+		t.Errorf("RestoreWorkload(unserved) = %v, want InvalidArgument naming the fidelity", err)
 	}
 }
