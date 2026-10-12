@@ -434,10 +434,11 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	slog.InfoContext(ctx, "Shutting down")
 }
 
-// containerKillTimeout bounds the post-SIGKILL wait, so a completely broken
-// gVisor cannot hold shutdown open indefinitely. It is deliberately not drawn
-// from the grace period: by this point the container has already had its
-// allowance and the deadline has passed. A var so tests can shorten it.
+// containerKillTimeout bounds the wait after SIGKILL, so a completely broken
+// gVisor cannot hold shutdown or a teardown open indefinitely. It is
+// deliberately not drawn from the grace period: by this point the container has
+// already had its allowance and the deadline has passed. A var so tests can
+// shorten it.
 var containerKillTimeout = 5 * time.Second
 
 // containerRuntime is the slice of *runsc that stopping and tearing down
@@ -808,7 +809,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// Cleanup the containers after checkpointing. This also unhosts the actor,
 	// before the snapshot listing below can fail.
 	// This is best-effort cleanup for actor containers that may have been left behind after checkpointing.
-	if err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers()); err != nil {
+	if err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers(), sandboxAfterCheckpoint(fidelity)); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
 			slog.String("actor", attribution.Ref.String()),
 			slog.String("actorUID", attribution.UID),
@@ -846,15 +847,58 @@ func listSnapshotFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
+// sandboxState is what the caller of terminateWorkload knows about the sandbox.
+type sandboxState int
+
+const (
+	// sandboxLive means the sandbox may still be running, so its containers are
+	// stopped before they are deleted.
+	sandboxLive sandboxState = iota
+	// sandboxEnded means the sandbox has already been stopped, and its
+	// containers with it. There is nothing left to signal, and `runsc wait` has
+	// no sandbox to answer it.
+	sandboxEnded
+)
+
+// sandboxAfterCheckpoint is the state a successful checkpoint of the given
+// fidelity leaves the sandbox in. A MEMORY checkpoint is `runsc checkpoint`
+// without --leave-running, which kills the sandbox once its state is saved. A
+// VOLUMES checkpoint only pauses it and resumes it.
+func sandboxAfterCheckpoint(fidelity ateompb.SnapshotFidelity) sandboxState {
+	if fidelity == ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		return sandboxEnded
+	}
+	return sandboxLive
+}
+
 // stopContainers stops the actor's application containers. The pause container
 // is left running: it is the sandbox, and cleanupContainers deletes the others
 // through it before deleting it last. Killing it first leaves the sentry a
 // zombie until reaped, which runsc delete mistakes for a live sandbox.
+//
+// Each wait is bounded by containerKillTimeout: a container that does not
+// stop promptly after SIGKILL is in a sandbox that will not answer, and
+// cleanupContainers, which runs on the same deadline, must still get to delete
+// it.
 func stopContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container) {
 	for _, ctr := range containers {
 		_ = rcmd.cmdKill(ctx, ctr.GetName(), "SIGKILL")
-		_ = rcmd.cmdWait(ctx, ctr.GetName())
+		waitCtx, cancel := context.WithTimeout(ctx, containerKillTimeout)
+		if err := rcmd.cmdWait(waitCtx, ctr.GetName()); err != nil && waitCtx.Err() != nil {
+			slog.WarnContext(ctx, "Container did not stop after SIGKILL; deleting it anyway",
+				slog.String("container", ctr.GetName()), slog.Duration("waited", containerKillTimeout))
+		}
+		cancel()
 	}
+}
+
+// teardownContainers removes the actor's containers from runsc. It stops the
+// application containers first unless the sandbox has already ended.
+func teardownContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container, sandbox sandboxState) error {
+	if sandbox == sandboxLive {
+		stopContainers(ctx, rcmd, containers)
+	}
+	return cleanupContainers(ctx, rcmd, containers)
 }
 
 func cleanupContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container) error {
@@ -1123,7 +1167,7 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 	if hosted != nil {
 		s.readFinal(ctx, hosted)
 	}
-	err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers())
+	err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers(), sandboxLive)
 	s.recordFinalIfEnded(ctx, hosted)
 	if err != nil {
 		return nil, fmt.Errorf("failed to terminate workload: %w", err)
@@ -1134,7 +1178,7 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 	return &ateompb.TerminateWorkloadResponse{}, nil
 }
 
-func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, actorDirs *ateompb.ActorDirs, containers []*ateompb.Container) error {
+func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, actorDirs *ateompb.ActorDirs, containers []*ateompb.Container, sandbox sandboxState) error {
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, resources.ActorAttribution{Ref: actorRef, UID: actorUID}); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
@@ -1150,13 +1194,12 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources
 	// container without its record and the actor unrecoverable.
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	// Stop the containers before deleting them, to avoid leaving a live container
-	// with no bundle on disk. Best-effort: if they are already stopped, the
-	// delete succeeds anyway.
-	stopContainers(cleanupCtx, rcmd, containers)
-	// Keep this as best-effort cleanup: atelet resets the bundle and checkpoint
-	// directories after uploading the snapshot.
-	if err := cleanupContainers(cleanupCtx, rcmd, containers); err != nil {
+	// A live sandbox's containers are stopped before they are deleted, to avoid
+	// leaving a live container with no bundle on disk. Best-effort: if they are
+	// already stopped, the delete succeeds anyway. Keep the deletion best-effort
+	// too: atelet resets the bundle and checkpoint directories after uploading
+	// the snapshot.
+	if err := teardownContainers(cleanupCtx, rcmd, containers, sandbox); err != nil {
 		errs = append(errs, fmt.Errorf("while cleaning up runsc containers: %w", err))
 	}
 
