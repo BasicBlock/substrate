@@ -155,6 +155,7 @@ func TestKeySpellings(t *testing.T) {
 		{ActorVersionKey, "ate.actor.version"},
 		{ActorStateKey, "ate.actor.state"},
 		{ActorOperationNameKey, "ate.actor.operation.name"},
+		{ActorRedriveOutcomeKey, "ate.actor.redrive.outcome"},
 		{WorkerPoolNamespaceKey, "ate.workerpool.namespace"},
 		{WorkerPoolNameKey, "ate.workerpool.name"},
 		{WorkerStateKey, "ate.worker.state"},
@@ -380,6 +381,12 @@ func TestMetricLabelValues(t *testing.T) {
 		{OperationPause, "pause"},
 		{OperationDelete, "delete"},
 		{OperationUnknown, "unknown"},
+
+		{RedriveOutcomeCompleted, "completed"},
+		{RedriveOutcomeCrashed, "crashed"},
+		{RedriveOutcomeFailed, "failed"},
+		{RedriveOutcomeBusy, "busy"},
+		{RedriveOutcomeSettled, "settled"},
 
 		{ImageCacheOutcomeHit, "hit"},
 		{ImageCacheOutcomeMiss, "miss"},
