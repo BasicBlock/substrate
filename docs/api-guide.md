@@ -632,6 +632,14 @@ Discards an actor's live or crashed execution and transitions it to `ACTOR_STATE
 *   Reverting terminates any bound worker sandbox, clears node-local pause checkpoints, and garbage-collects any partial external snapshot left by an interrupted suspend while preserving the last committed durable snapshot in `status.snapshots`.
 *   External volumes are not reverted. Their contents are never part of a snapshot, so a reverted actor comes back with its memory and root filesystem rewound but its volumes exactly as the discarded execution left them.
 
+
+#### `DropSnapshotMemory`
+Downgrades a `SUSPENDED` actor's stored `MEMORY` snapshot to `ROOTFS` in place, keeping its root filesystem and durable data and emptying its memory objects in snapshot storage. The actor's next resume cold-boots from those files: it restores wherever a worker can run the image, where a memory image taken under another `runsc`, CPU or worker may not, and it stores less. Meant for a long-suspended actor (a workspace idle for days).
+*   **Request:** `DropSnapshotMemoryRequest`
+    *   `actor`: `ObjectRef` of the actor.
+*   **Response:** `DropSnapshotMemoryResponse` containing the `Actor`, still `ACTOR_STATE_SUSPENDED`, whose snapshot now records `SNAPSHOT_FIDELITY_ROOTFS`.
+*   **Errors:** `FAILED_PRECONDITION` if the actor is not `SUSPENDED`, has no durable snapshot, holds a `VOLUMES` snapshot, or its `MEMORY` snapshot holds no root filesystem to keep (gVisor takes one beside the memory image on a best-effort basis). Idempotent: a repeat on a `ROOTFS` snapshot succeeds. Authorized like `SuspendActor` (`can_suspend`). `kubectl ate drop snapshot-memory`.
+
 #### `DeleteActor`
 Removes an actor from the registry and cleans up associated resources.
 *   **Request:** `DeleteActorRequest`
