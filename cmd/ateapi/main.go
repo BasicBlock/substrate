@@ -102,6 +102,10 @@ var (
 
 	templateResyncInterval = pflag.Duration("template-resync-interval", 20*time.Second, fmt.Sprintf("Interval between actor template resyncs. Must be at least %s.", minResyncInterval))
 
+	enableStrandedActorRedrive  = pflag.Bool("enable-stranded-actor-redrive", true, "Finish the suspend, pause, revert or delete of an actor that no workflow is running, such as one a restart of ateapi cut off. Turning it off leaves such an actor in its transitional state until its operation is called again.")
+	strandedActorMinAge         = pflag.Duration("stranded-actor-min-age", 5*time.Minute, "How long an actor in SUSPENDING, PAUSING, REVERTING or DELETING must have gone unwritten before ateapi re-drives its operation. It is the delay before a stranded actor is finished, and gives a client that is retrying the operation time to finish it first. Must be positive.")
+	strandedActorResyncInterval = pflag.Duration("stranded-actor-resync-interval", 2*time.Minute, fmt.Sprintf("Interval between sweeps that list every actor for stranded ones. Each sweep reads every actor, so raise it on a deployment with very many. Must be at least %s.", minResyncInterval))
+
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
 )
@@ -126,6 +130,12 @@ func main() {
 	slog.InfoContext(ctx, "ateapi starting", slog.String("version", version.Version))
 	if *templateResyncInterval < minResyncInterval {
 		serverboot.Fatal(ctx, "Invalid --template-resync-interval", fmt.Errorf("must be at least %s", minResyncInterval))
+	}
+	if *strandedActorMinAge <= 0 {
+		serverboot.Fatal(ctx, "Invalid --stranded-actor-min-age", fmt.Errorf("must be positive, got %s", *strandedActorMinAge))
+	}
+	if *strandedActorResyncInterval < minResyncInterval {
+		serverboot.Fatal(ctx, "Invalid --stranded-actor-resync-interval", fmt.Errorf("must be at least %s", minResyncInterval))
 	}
 	if err := validateActorJWTIssuer(*actorJWTIssuer); err != nil {
 		serverboot.Fatal(ctx, "Invalid --actor-jwt-issuer", err)
@@ -328,6 +338,12 @@ func main() {
 	workerAssignmentReconciler := controlapi.NewWorkerAssignmentReconciler(persistence, workerCache)
 	workerAssignmentReconciler.Start(shutdownCtx)
 
+	// Finish the operations that Actors were left in the middle of.
+	if *enableStrandedActorRedrive {
+		strandedActorReconciler := controlapi.NewStrandedActorReconciler(persistence, controlSrv, *strandedActorMinAge, *strandedActorResyncInterval)
+		strandedActorReconciler.Start(shutdownCtx)
+	}
+
 	lisCfg := &net.ListenConfig{}
 	lis, err := lisCfg.Listen(ctx, "tcp", *listenAddr)
 	if err != nil {
@@ -500,6 +516,9 @@ func logFlagValues(ctx context.Context) {
 		slog.String("atelet-client-cred-bundle", *ateletClientCredBundle),
 		slog.Duration("drain-delay", *drainDelay),
 		slog.Duration("drain-timeout", *drainTimeout),
+		slog.Bool("enable-stranded-actor-redrive", *enableStrandedActorRedrive),
+		slog.Duration("stranded-actor-min-age", *strandedActorMinAge),
+		slog.Duration("stranded-actor-resync-interval", *strandedActorResyncInterval),
 	)
 }
 
