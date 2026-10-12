@@ -1037,13 +1037,16 @@ type capturingAtelet struct {
 	restore    *ateletpb.RestoreRequest
 	run        *ateletpb.RunRequest
 	checkpoint *ateletpb.CheckpointRequest
+	// restoredFidelity is echoed on every Restore response, so a test can
+	// simulate atelet reporting a restore at a lower fidelity than requested.
+	restoredFidelity ateletpb.SnapshotFidelity
 }
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.restore = proto.Clone(req).(*ateletpb.RestoreRequest)
-	return &ateletpb.RestoreResponse{}, nil
+	return &ateletpb.RestoreResponse{RestoredFidelity: f.restoredFidelity}, nil
 }
 
 func (f *capturingAtelet) Run(ctx context.Context, req *ateletpb.RunRequest) (*ateletpb.RunResponse, error) {
@@ -1149,6 +1152,57 @@ func newWireCaptureWorkflow(t *testing.T, persistence store.Interface) (*ActorWo
 	}})
 
 	return &ActorWorkflow{store: persistence, dialer: dialer, sandboxConfigLister: lister}, fake
+}
+
+// TestEnsureAteletRestored_RootfsFallback pins that when atelet reports a
+// restore at a lower fidelity than the one it was asked for (its MEMORY
+// restore failed and it cold-booted from the snapshot's root filesystem), the
+// resume workflow reports the fidelity actually restored on the restore
+// telemetry, and that atelet, not ateapi, performs the fallback.
+func TestEnsureAteletRestored_RootfsFallback(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	w, atelet := newWireCaptureWorkflow(t, persistence)
+	atelet.restoredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+
+	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
+	_, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
+		SnapshotConfig: &ateapipb.SnapshotConfig{
+			StorageLocation:   testStorageLocation,
+			PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		},
+		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor"},
+	})
+	if err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapipb.ActorState_ACTOR_STATE_PAUSED, func(a *ateapipb.Actor) {
+		a.Status.WorkerAssignment = wireTestAssignment()
+		a.Status.LastAssignedGeneration = 1
+		a.Status.Snapshots = []*ateapipb.Snapshot{newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap-1", "node-1")}
+	})
+
+	actor, loadedTmpl, src, err := w.loadActorForResume(ctx, actorRef)
+	if err != nil {
+		t.Fatalf("loadActorForResume: %v", err)
+	}
+	tele, err := w.ensureAteletRestored(ctx, actorRef, actor, loadedTmpl, nil, src)
+	if err != nil {
+		t.Fatalf("ensureAteletRestored: %v", err)
+	}
+	if tele.WireFidelity != ateattr.SnapshotFidelityRootfs {
+		t.Errorf("WireFidelity = %q, want %q (the fallback's actual fidelity, not the requested %q)",
+			tele.WireFidelity, ateattr.SnapshotFidelityRootfs, ateattr.SnapshotFidelityMemory)
+	}
+
+	restore, _ := atelet.requests()
+	if restore.GetFidelity() != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		t.Errorf("atelet request fidelity = %v, want %v (atelet, not ateapi, performs the fallback retry)",
+			restore.GetFidelity(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	}
 }
 
 // TestResumeActor_AteletWireRequest is the characteristic test for the

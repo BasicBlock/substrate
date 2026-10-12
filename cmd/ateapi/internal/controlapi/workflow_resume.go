@@ -719,9 +719,11 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		req.Fidelity = fidelityToAtelet(localSnap.GetFidelity())
 		tele.WireFidelity = ateattr.SnapshotFidelityValue(req.Fidelity)
 
-		if _, err = client.Restore(ctx, req); err != nil {
+		resp, err := client.Restore(ctx, req)
+		if err != nil {
 			return tele, handleAteletError(ctx, w.store, actorRef, ateattr.OperationResume, "Restore", false, err)
 		}
+		noteRestoredFidelity(ctx, actorRef, &tele, req.GetFidelity(), resp)
 		return tele, nil
 	} else if !src.SnapshotURI.IsZero() {
 		slog.InfoContext(ctx, "Actor has durable snapshot; Restoring from snapshot")
@@ -751,9 +753,11 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			CpuMilli:      cpuMilli,
 			MemoryBytes:   memBytes,
 		}
-		if _, err = client.Restore(ctx, req); err != nil {
+		resp, err := client.Restore(ctx, req)
+		if err != nil {
 			return tele, handleAteletError(ctx, w.store, actorRef, ateattr.OperationResume, "Restore", false, err)
 		}
+		noteRestoredFidelity(ctx, actorRef, &tele, req.GetFidelity(), resp)
 		return tele, nil
 	} else {
 		slog.InfoContext(ctx, "Actor has no snapshot; Booting from ActorTemplate spec")
@@ -777,6 +781,24 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 		return tele, nil
 	}
+}
+
+// noteRestoredFidelity records a restore that came back at a lower fidelity
+// than requested: atelet cold-booted the actor from its snapshot's root
+// filesystem after the memory restore failed. It logs the actor's own identity
+// (atelet's log is node-local) and corrects the restore telemetry, so
+// ate.snapshot.fidelity on the resume metric reports what happened rather than
+// what was asked for.
+func noteRestoredFidelity(ctx context.Context, actorRef resources.ActorRef, tele *restoreTelemetry, requested ateletpb.SnapshotFidelity, resp *ateletpb.RestoreResponse) {
+	restored := resp.GetRestoredFidelity()
+	if restored == ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED || restored == requested {
+		return
+	}
+	slog.WarnContext(ctx, "Actor restored at a lower snapshot fidelity than requested; its processes did not survive",
+		slog.Any("actor", actorRef),
+		slog.String("requested", ateattr.SnapshotFidelityValue(requested)),
+		slog.String("restored", ateattr.SnapshotFidelityValue(restored)))
+	tele.WireFidelity = ateattr.SnapshotFidelityValue(restored)
 }
 
 func (w *ActorWorkflow) egressGateway() *ateletpb.EgressGateway {
