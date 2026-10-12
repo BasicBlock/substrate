@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateomcgroup"
+	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 )
@@ -39,11 +40,15 @@ const forceExitWait = 10 * time.Second
 
 // sandboxForcer kills what is left of an actor's sandbox when runsc cannot
 // tear it down itself. Its roots are fields so tests can point it at a fake
-// /proc and cgroup tree.
+// /proc and cgroup tree, and kill and unmount so they need neither a process
+// to signal nor a mount to detach.
 type sandboxForcer struct {
 	procRoot   string
 	cgroupRoot string
 	kill       func(pid int) error
+	// unmount detaches every mount at or below a directory, in ateom's mount
+	// namespace.
+	unmount func(dir string) error
 }
 
 func newSandboxForcer(cgroupRoot string) sandboxForcer {
@@ -51,6 +56,7 @@ func newSandboxForcer(cgroupRoot string) sandboxForcer {
 		procRoot:   "/proc",
 		cgroupRoot: cgroupRoot,
 		kill:       func(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) },
+		unmount:    imagecache.UnmountAllUnder,
 	}
 }
 
@@ -58,8 +64,8 @@ func newSandboxForcer(cgroupRoot string) sandboxForcer {
 // actor's container cgroups (cgroup.kill), and every process started with the
 // actor's runsc root -- the sandbox, its gofers, and any runsc command still
 // holding the container's lock, which run in ateom's own cgroup -- then
-// empties the runsc root so no stale record of the containers remains, and
-// removes the emptied cgroups. Only this actor's leaves and processes are
+// detaches the mounts runsc left in its root and empties it, so no stale
+// record of the containers remains, and removes the emptied cgroups. Only this actor's leaves and processes are
 // touched, so the other actors a worker hosts keep running. A hung runsc
 // otherwise fails every teardown, leaving the worker's slot unusable and the
 // actor stuck deleting until its pod is deleted.
@@ -90,6 +96,13 @@ func (f sandboxForcer) forceStop(ctx context.Context, actorUID string, actorDirs
 		errs = append(errs, fmt.Errorf("runsc processes %v did not exit within %s", left, forceExitWait))
 	}
 
+	// runsc leaves mounts in its root (the bind mount of its null-netns), which
+	// cannot be unlinked until they are detached in this mount namespace:
+	// without this the RemoveAll below fails with EBUSY on every forced
+	// teardown. Failing to detach is reported, but the removal is still tried.
+	if err := f.unmount(runscRoot); err != nil {
+		errs = append(errs, fmt.Errorf("while unmounting under runsc state %s: %w", runscRoot, err))
+	}
 	if err := os.RemoveAll(runscRoot); err != nil {
 		errs = append(errs, fmt.Errorf("while removing runsc state %s: %w", runscRoot, err))
 	} else if err := os.MkdirAll(runscRoot, 0o700); err != nil {
