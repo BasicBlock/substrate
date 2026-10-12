@@ -1144,15 +1144,22 @@ func wireTestAssignment() *ateapipb.WorkerAssignment {
 }
 
 // newWireCaptureWorkflow builds an ActorWorkflow whose atelet dialer resolves
-// to an in-process capturing fake. The dialer's conn cache is pre-warmed with
-// a bufconn-backed connection for the atelet pod's UID and IP, so
-// DialForAteletOnNode returns it without dialing the pod IP.
+// to an in-process capturing fake.
 func newWireCaptureWorkflow(t *testing.T, persistence store.Interface) (*ActorWorkflow, *capturingAtelet) {
 	t.Helper()
-
 	fake := &capturingAtelet{}
+	return newAteletBackedWorkflow(t, persistence, fake), fake
+}
+
+// newAteletBackedWorkflow builds an ActorWorkflow whose atelet dialer resolves
+// to the in-process atelet that server implements. The dialer's conn cache is
+// pre-warmed with a bufconn-backed connection for the atelet pod's UID and IP,
+// so DialForAteletOnNode returns it without dialing the pod IP.
+func newAteletBackedWorkflow(t *testing.T, persistence store.Interface, server ateletpb.AteomHerderServer) *ActorWorkflow {
+	t.Helper()
+
 	srv := grpc.NewServer()
-	ateletpb.RegisterAteomHerderServer(srv, fake)
+	ateletpb.RegisterAteomHerderServer(srv, server)
 	lis := bufconn.Listen(1 << 20)
 	go func() {
 		if err := srv.Serve(lis); err != nil {
@@ -1193,7 +1200,7 @@ func newWireCaptureWorkflow(t *testing.T, persistence store.Interface) (*ActorWo
 		},
 	}})
 
-	return &ActorWorkflow{store: persistence, dialer: dialer, sandboxConfigLister: lister}, fake
+	return &ActorWorkflow{store: persistence, dialer: dialer, sandboxConfigLister: lister}
 }
 
 // TestResumeActor_AteletWireRequest is the characteristic test for the
