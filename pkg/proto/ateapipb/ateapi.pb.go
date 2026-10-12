@@ -5167,7 +5167,8 @@ type CheckActorAccessRequest struct {
 	// +k8s:required
 	// +k8s:subfield(atespace)=+k8s:required
 	Actor *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
-	// The client's token, a JWT, as the gateway received it.
+	// The client's token, a JWT, as the gateway received it. Redacted from logs
+	// and traces.
 	// +k8s:required
 	Token         string `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -9030,10 +9031,10 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x12PauseActorResponse\x12#\n" +
 	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\"=\n" +
 	"\x12ResumeActorRequest\x12'\n" +
-	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"X\n" +
+	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"]\n" +
 	"\x17CheckActorAccessRequest\x12'\n" +
-	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\tR\x05token\"j\n" +
+	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\x12\x19\n" +
+	"\x05token\x18\x02 \x01(\tB\x03\x80\x01\x01R\x05token\"j\n" +
 	"\x18CheckActorAccessResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x1c\n" +
 	"\tprincipal\x18\x02 \x01(\tR\tprincipal\x12\x16\n" +

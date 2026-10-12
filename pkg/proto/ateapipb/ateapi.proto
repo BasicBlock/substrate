@@ -1686,9 +1686,10 @@ message CheckActorAccessRequest {
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
 
-  // The client's token, a JWT, as the gateway received it.
+  // The client's token, a JWT, as the gateway received it. Redacted from logs
+  // and traces.
   // +k8s:required
-  string token = 2;
+  string token = 2 [ debug_redact = true ];
 }
 
 message CheckActorAccessResponse {
