@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/agent-substrate/substrate/internal/imagecache"
-	"github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
@@ -156,7 +155,7 @@ func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
 		if resp.GetNextPageToken() == "" {
 			break
 		}
-		workersReq.PageToken = resp.GetNextPageToken()
+		workersReq.Options = &ateapipb.ListOptions{PageToken: resp.GetNextPageToken()}
 	}
 	if len(traits) == 0 {
 		return nil, nil
@@ -182,7 +181,7 @@ func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
 		if resp.GetNextPageToken() == "" {
 			break
 		}
-		templatesReq.PageToken = resp.GetNextPageToken()
+		templatesReq.Options = &ateapipb.ListOptions{PageToken: resp.GetNextPageToken()}
 	}
 	slices.Sort(refs)
 	return slices.Compact(refs), nil
@@ -192,7 +191,7 @@ func (p *templateImagePrewarmer) wanted(ctx context.Context) ([]string, error) {
 // by the template-level half of the scheduler's constraints. An actor's own
 // selector can narrow placement further, but only narrow it.
 func placeable(tmpl *ateapipb.ActorTemplate, pools map[workerPoolRef]poolTraits) bool {
-	class := templateSandboxClass(tmpl.GetSandboxConfig().GetSandboxClass())
+	class := tmpl.GetSandboxConfig().GetSandboxClass()
 	selector := labels.SelectorFromSet(labels.Set(tmpl.GetWorkerSelector().GetMatchLabels()))
 	for _, pool := range pools {
 		if pool.sandboxClass == class && selector.Matches(pool.labels) {
@@ -200,17 +199,4 @@ func placeable(tmpl *ateapipb.ActorTemplate, pools map[workerPoolRef]poolTraits)
 		}
 	}
 	return false
-}
-
-// templateSandboxClass renders a template's sandbox class in the WorkerPool
-// vocabulary a Worker's sandbox_class carries, as the scheduler compares them.
-func templateSandboxClass(class ateapipb.SandboxClass) string {
-	switch class {
-	case ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR:
-		return string(v1alpha1.SandboxClassGvisor)
-	case ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM:
-		return string(v1alpha1.SandboxClassMicroVM)
-	default:
-		return ""
-	}
 }

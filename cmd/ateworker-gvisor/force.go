@@ -28,9 +28,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agent-substrate/substrate/internal/ateomcgroup"
+	"github.com/agent-substrate/substrate/internal/ateworker/cgroup"
 	"github.com/agent-substrate/substrate/internal/ocispec"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 )
 
 // forceExitWait bounds how long forceStopSandbox waits for killed processes to
@@ -63,7 +63,7 @@ func newSandboxForcer(cgroupRoot string) sandboxForcer {
 // touched, so the other actors a worker hosts keep running. A hung runsc
 // otherwise fails every teardown, leaving the worker's slot unusable and the
 // actor stuck deleting until its pod is deleted.
-func (f sandboxForcer) forceStop(ctx context.Context, actorUID string, actorDirs *ateompb.ActorDirs, containers []string) error {
+func (f sandboxForcer) forceStop(ctx context.Context, actorUID string, actorDirs *ateworkerpb.ActorDirs, containers []string) error {
 	var errs []error
 	killCtx, cancel := context.WithTimeout(ctx, forceExitWait)
 	defer cancel()
@@ -71,7 +71,7 @@ func (f sandboxForcer) forceStop(ctx context.Context, actorUID string, actorDirs
 	for _, name := range append(containers, ocispec.PauseContainer) {
 		leaf := ocispec.GVisorCgroupLeaf(actorUID, name)
 		leaves = append(leaves, filepath.Join(f.cgroupRoot, leaf))
-		if err := ateomcgroup.KillLeafUnder(killCtx, f.cgroupRoot, leaf); err != nil {
+		if err := cgroup.KillLeafUnder(killCtx, f.cgroupRoot, leaf); err != nil {
 			errs = append(errs, err)
 		}
 	}

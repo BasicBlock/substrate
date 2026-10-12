@@ -112,10 +112,10 @@ func (f *fakeControl) ListWorkerActorAssignments(_ context.Context, in *ateapipb
 	}
 	bound := f.assignments[name]
 	start := 0
-	if in.GetPageToken() != "" {
+	if in.GetOptions().GetPageToken() != "" {
 		var err error
-		if start, err = strconv.Atoi(in.GetPageToken()); err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "bad page token %q", in.GetPageToken())
+		if start, err = strconv.Atoi(in.GetOptions().GetPageToken()); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "bad page token %q", in.GetOptions().GetPageToken())
 		}
 	}
 	resp := &ateapipb.ListWorkerActorAssignmentsResponse{}

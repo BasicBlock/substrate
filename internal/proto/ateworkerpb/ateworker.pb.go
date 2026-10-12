@@ -1376,8 +1376,15 @@ type CheckpointWorkloadResponse struct {
 	// data_snapshot_files is the subset of snapshot_files that restores the
 	// actor at VOLUMES fidelity on its own. Empty when the capture holds no durable data.
 	DataSnapshotFiles []string `protobuf:"bytes,2,rep,name=data_snapshot_files,json=dataSnapshotFiles,proto3" json:"data_snapshot_files,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// rootfs_snapshot_files is the subset of snapshot_files that restores the
+	// actor at ROOTFS fidelity on its own: the root filesystem changes and the
+	// durable data, without process memory. Empty when the capture holds no
+	// restorable root filesystem, as for a MEMORY capture of a runtime that
+	// cannot take one beside the memory image, or one whose root filesystem
+	// capture failed.
+	RootfsSnapshotFiles []string `protobuf:"bytes,3,rep,name=rootfs_snapshot_files,json=rootfsSnapshotFiles,proto3" json:"rootfs_snapshot_files,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *CheckpointWorkloadResponse) Reset() {
@@ -1420,6 +1427,13 @@ func (x *CheckpointWorkloadResponse) GetSnapshotFiles() []string {
 func (x *CheckpointWorkloadResponse) GetDataSnapshotFiles() []string {
 	if x != nil {
 		return x.DataSnapshotFiles
+	}
+	return nil
+}
+
+func (x *CheckpointWorkloadResponse) GetRootfsSnapshotFiles() []string {
+	if x != nil {
+		return x.RootfsSnapshotFiles
 	}
 	return nil
 }
@@ -2099,10 +2113,11 @@ const file_ateworker_proto_rawDesc = "" +
 	"actor_dirs\x18\v \x01(\v2\x14.ateworker.ActorDirsR\tactorDirs\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"s\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x01\n" +
 	"\x1aCheckpointWorkloadResponse\x12%\n" +
 	"\x0esnapshot_files\x18\x01 \x03(\tR\rsnapshotFiles\x12.\n" +
-	"\x13data_snapshot_files\x18\x02 \x03(\tR\x11dataSnapshotFiles\"\xb0\x06\n" +
+	"\x13data_snapshot_files\x18\x02 \x03(\tR\x11dataSnapshotFiles\x122\n" +
+	"\x15rootfs_snapshot_files\x18\x03 \x03(\tR\x13rootfsSnapshotFiles\"\xb0\x06\n" +
 	"\x16RestoreWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +

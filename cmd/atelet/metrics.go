@@ -79,6 +79,9 @@ type snapshotOp struct {
 	kind              string
 	fidelity          string
 	sandboxClass      string
+	// fallback is the ateattr.RestoreFallback* value of a restore that fell
+	// back to a lower fidelity, with fidelity then naming the one it restored.
+	fallback string
 }
 
 // attrs omits kind and sandbox class while they are unknown (a restore that
@@ -96,6 +99,9 @@ func (o snapshotOp) attrs() []attribute.KeyValue {
 	}
 	if o.sandboxClass != "" {
 		attrs = append(attrs, ateattr.SandboxClassAttribute(o.sandboxClass))
+	}
+	if o.fallback != "" {
+		attrs = append(attrs, ateattr.RestoreFallbackKey.String(o.fallback))
 	}
 	return attrs
 }

@@ -52,7 +52,7 @@ func (f *fakePrewarmControl) ListWorkers(_ context.Context, in *ateapipb.ListWor
 	if f.err != nil {
 		return nil, f.err
 	}
-	items, next := prewarmPage(f.workers, in.GetPageToken())
+	items, next := prewarmPage(f.workers, in.GetOptions().GetPageToken())
 	return &ateapipb.ListWorkersResponse{Workers: items, NextPageToken: next}, nil
 }
 
@@ -60,7 +60,7 @@ func (f *fakePrewarmControl) ListActorTemplates(_ context.Context, in *ateapipb.
 	if in.GetAtespace() != "" {
 		return nil, errors.New("the prewarmer must list templates across all atespaces")
 	}
-	items, next := prewarmPage(f.templates, in.GetPageToken())
+	items, next := prewarmPage(f.templates, in.GetOptions().GetPageToken())
 	return &ateapipb.ListActorTemplatesResponse{ActorTemplates: items, NextPageToken: next}, nil
 }
 
@@ -85,7 +85,7 @@ func prewarmWorker(pool, class string, labels map[string]string) *ateapipb.Worke
 	return &ateapipb.Worker{WorkerNamespace: "ate-workers", WorkerPool: pool, SandboxClass: class, Labels: labels}
 }
 
-func prewarmTemplate(class ateapipb.SandboxClass, selector map[string]string, images ...string) *ateapipb.ActorTemplate {
+func prewarmTemplate(class string, selector map[string]string, images ...string) *ateapipb.ActorTemplate {
 	tmpl := &ateapipb.ActorTemplate{SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: class}}
 	if selector != nil {
 		tmpl.WorkerSelector = &ateapipb.Selector{MatchLabels: selector}
@@ -111,7 +111,7 @@ func prewarmPools(names ...string) func(context.Context) map[string]workerPoolRe
 // the scheduler could place on a pool with a pod here, matched on sandbox
 // class and the template's worker selector against the pool's labels.
 func TestTemplateImagePrewarmWanted(t *testing.T) {
-	gvisor, microvm := ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM
+	gvisor, microvm := "gvisor", "microvm"
 	control := &fakePrewarmControl{
 		workers: []*ateapipb.Worker{
 			prewarmWorker("workspaces", "gvisor", map[string]string{"workload": "workspace"}),
@@ -160,7 +160,7 @@ func TestTemplateImagePrewarmWanted(t *testing.T) {
 // once, and that a failed pull is retried by the next pass while a pulled one
 // is not pulled again.
 func TestTemplateImagePrewarmPass(t *testing.T) {
-	gvisor := ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR
+	gvisor := "gvisor"
 	control := &fakePrewarmControl{
 		workers:   []*ateapipb.Worker{prewarmWorker("workspaces", "gvisor", nil)},
 		templates: []*ateapipb.ActorTemplate{prewarmTemplate(gvisor, nil, "registry/a@sha256:1", "registry/b@sha256:2")},

@@ -679,7 +679,7 @@ func (s *WorkerPoolSyncer) boundActors(ctx context.Context, key workerKey) []*at
 		if resp.GetNextPageToken() == "" {
 			return actors
 		}
-		req.PageToken = resp.GetNextPageToken()
+		req.Options = &ateapipb.ListOptions{PageToken: resp.GetNextPageToken()}
 	}
 }
 

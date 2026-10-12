@@ -382,6 +382,22 @@ groups:
               stability: development
               value: total
               brief: The full operation. Use this value as the denominator. Do not add the phases together.
+      - id: ate.restore.fallback
+        stability: development
+        brief: >
+          The fallback that a restore took to a lower fidelity. It is present
+          only on a restore that fell back. Its absence means the normal path
+          ran. Thus the common case does not gain a label. The
+          ate.snapshot.fidelity key on the same measurement is the fidelity
+          that was restored, not the one that was requested.
+        type:
+          members:
+            - id: memory_to_rootfs
+              stability: development
+              value: memory_to_rootfs
+              brief: >
+                The memory restore failed. The snapshot held the root
+                filesystem. atelet cold-booted the actor from it.
 
   - id: registry.ate.scheduler
     type: attribute_group
@@ -921,6 +937,9 @@ groups:
       - ref: ate.sandbox.class
         requirement_level:
           conditionally_required: The class is known.
+      - ref: ate.restore.fallback
+        requirement_level:
+          conditionally_required: The restore fell back to a lower fidelity.
 
   - id: metric.ate.actor.checkpoint.duration
     type: metric

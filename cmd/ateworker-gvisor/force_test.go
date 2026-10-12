@@ -26,7 +26,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ocispec"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 )
 
 // fakeProc writes a /proc entry for pid with args as its command line; a
@@ -48,8 +48,8 @@ func fakeProc(t *testing.T, root string, pid int, args ...string) {
 func TestForceStopKillsTheActorsSandboxOnly(t *testing.T) {
 	actorsRoot := t.TempDir()
 	const uid, other = "actor-uid", "other-uid"
-	actorDirs := &ateompb.ActorDirs{RootDir: filepath.Join(actorsRoot, uid)}
-	otherDirs := &ateompb.ActorDirs{RootDir: filepath.Join(actorsRoot, other)}
+	actorDirs := &ateworkerpb.ActorDirs{RootDir: filepath.Join(actorsRoot, uid)}
+	otherDirs := &ateworkerpb.ActorDirs{RootDir: filepath.Join(actorsRoot, other)}
 
 	procRoot, cgroupRoot := t.TempDir(), t.TempDir()
 	root := runscStateDir(actorDirs)
@@ -100,7 +100,7 @@ func TestForceStopKillsTheActorsSandboxOnly(t *testing.T) {
 }
 
 func TestForceStopWithNothingLeft(t *testing.T) {
-	actorDirs := &ateompb.ActorDirs{RootDir: filepath.Join(t.TempDir(), "actor-uid")}
+	actorDirs := &ateworkerpb.ActorDirs{RootDir: filepath.Join(t.TempDir(), "actor-uid")}
 
 	f := sandboxForcer{procRoot: t.TempDir(), cgroupRoot: t.TempDir(), kill: func(int) error {
 		t.Error("killed a process when none was the actor's")
