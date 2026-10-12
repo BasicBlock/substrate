@@ -18,16 +18,23 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
+	"github.com/agent-substrate/substrate/internal/roottest"
+	"golang.org/x/sys/unix"
 )
+
+// noUnmount is an unmount that finds no mounts to detach.
+func noUnmount(string) error { return nil }
 
 // fakeProc writes a /proc entry for pid with args as its command line; a
 // killed process turns into a zombie, as the reaper would find it.
@@ -74,7 +81,7 @@ func TestForceStopKillsTheActorsSandboxOnly(t *testing.T) {
 	}
 
 	var killed []int
-	f := sandboxForcer{procRoot: procRoot, cgroupRoot: cgroupRoot, kill: func(pid int) error {
+	f := sandboxForcer{procRoot: procRoot, cgroupRoot: cgroupRoot, unmount: noUnmount, kill: func(pid int) error {
 		killed = append(killed, pid)
 		// The reaper has yet to collect it.
 		return os.WriteFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"), []byte("State:\tZ (zombie)\n"), 0o644)
@@ -102,12 +109,109 @@ func TestForceStopKillsTheActorsSandboxOnly(t *testing.T) {
 func TestForceStopWithNothingLeft(t *testing.T) {
 	actorDirs := &ateworkerpb.ActorDirs{RootDir: filepath.Join(t.TempDir(), "actor-uid")}
 
-	f := sandboxForcer{procRoot: t.TempDir(), cgroupRoot: t.TempDir(), kill: func(int) error {
+	f := sandboxForcer{procRoot: t.TempDir(), cgroupRoot: t.TempDir(), unmount: noUnmount, kill: func(int) error {
 		t.Error("killed a process when none was the actor's")
 		return nil
 	}}
 	if err := f.forceStop(context.Background(), "actor-uid", actorDirs, []string{"app"}); err != nil {
 		t.Fatalf("forceStop with no sandbox left: %v", err)
+	}
+}
+
+// runscRootWithNullNetns makes the runsc root of a fresh actor, holding the
+// null-netns file runsc keeps there (a mount point once runsc has run), and
+// returns the root and the file.
+func runscRootWithNullNetns(t *testing.T) (actorDirs *ateworkerpb.ActorDirs, root, nullNetns string) {
+	t.Helper()
+	actorDirs = &ateworkerpb.ActorDirs{RootDir: filepath.Join(t.TempDir(), "actor-uid")}
+	root = runscStateDir(actorDirs)
+	nullNetns = filepath.Join(root, "null-netns")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nullNetns, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return actorDirs, root, nullNetns
+}
+
+// forcerWithNothingToKill is a forcer that finds no processes or cgroups of
+// the actor, so that only what it does to the runsc root is under test.
+func forcerWithNothingToKill(t *testing.T, unmount func(dir string) error) sandboxForcer {
+	t.Helper()
+	return sandboxForcer{procRoot: t.TempDir(), cgroupRoot: t.TempDir(), unmount: unmount, kill: func(pid int) error {
+		t.Errorf("killed process %d when none was the actor's", pid)
+		return nil
+	}}
+}
+
+// runsc leaves a mount in its root, and a mount point cannot be unlinked, so
+// the mounts must be detached before the root is removed. Which root is
+// detached matters too: it is the actor's own.
+func TestForceStopDetachesTheRunscRootsMountsBeforeRemovingIt(t *testing.T) {
+	actorDirs, root, nullNetns := runscRootWithNullNetns(t)
+
+	var detached []string
+	f := forcerWithNothingToKill(t, func(dir string) error {
+		if _, err := os.Lstat(nullNetns); err != nil {
+			t.Errorf("the runsc root was emptied before its mounts were detached: %v", err)
+		}
+		detached = append(detached, dir)
+		return nil
+	})
+	if err := f.forceStop(context.Background(), "actor-uid", actorDirs, []string{"app"}); err != nil {
+		t.Fatalf("forceStop: %v", err)
+	}
+
+	if !slices.Equal(detached, []string{root}) {
+		t.Errorf("detached mounts under %v, want only the actor's runsc root %q", detached, root)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Errorf("runsc root holds %v (%v), want it emptied and recreated", entries, err)
+	}
+}
+
+// A mount that will not detach is an error of the forced teardown, as any
+// other step's is, but does not stop the root from being emptied.
+func TestForceStopReportsMountsItCannotDetachAndStillEmptiesTheRunscRoot(t *testing.T) {
+	actorDirs, root, nullNetns := runscRootWithNullNetns(t)
+
+	f := forcerWithNothingToKill(t, func(string) error { return errors.New("umount2: operation not permitted") })
+	err := f.forceStop(context.Background(), "actor-uid", actorDirs, []string{"app"})
+
+	if err == nil || !strings.Contains(err.Error(), "while unmounting under runsc state "+root) {
+		t.Errorf("forceStop = %v, want it to report the mounts it could not detach", err)
+	}
+	if _, statErr := os.Lstat(nullNetns); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("null-netns survived the forced teardown (Lstat err = %v)", statErr)
+	}
+}
+
+// The production failure, with a real mount: unlinking a runsc root whose
+// null-netns is mounted fails with EBUSY, and the forcer, which detaches the
+// mounts first, removes it.
+func TestForceStopRemovesARunscRootWhoseNullNetnsIsMounted(t *testing.T) {
+	roottest.Require(t, "bind mount")
+	actorDirs, root, nullNetns := runscRootWithNullNetns(t)
+	source := filepath.Join(t.TempDir(), "netns")
+	if err := os.WriteFile(source, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount(source, nullNetns, "", unix.MS_BIND, ""); err != nil {
+		t.Skipf("cannot bind mount here: %v", err)
+	}
+	t.Cleanup(func() { _ = unix.Unmount(nullNetns, unix.MNT_DETACH) })
+	if err := os.RemoveAll(root); !errors.Is(err, syscall.EBUSY) {
+		t.Skipf("this environment does not pin a mounted file (RemoveAll err = %v), so there is no failure to cure", err)
+	}
+
+	f := newSandboxForcer(t.TempDir())
+	f.procRoot = t.TempDir()
+	if err := f.forceStop(context.Background(), "actor-uid", actorDirs, []string{"app"}); err != nil {
+		t.Fatalf("forceStop: %v", err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Errorf("runsc root holds %v (%v), want it emptied and recreated", entries, err)
 	}
 }
 
