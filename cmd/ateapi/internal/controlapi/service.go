@@ -17,6 +17,7 @@ package controlapi
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
@@ -106,6 +107,13 @@ func NewRPCService(
 	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, snapshotPlugin)
 	s.workerWorkflow = NewWorkerWorkflow(impl)
 	return s
+}
+
+// RedriveActor finishes the operation observed was left in the middle of; see
+// ActorWorkflow.RedriveActor. It is not an RPC: the stranded actor reconciler
+// calls it in process.
+func (s *RPCService) RedriveActor(ctx context.Context, observed *ateapipb.Actor, notUpdatedSince time.Time) (RedriveResult, error) {
+	return s.actorWorkflow.RedriveActor(ctx, observed, notUpdatedSince)
 }
 
 // serviceStore enumerates the exact storage methods needed by
