@@ -33,8 +33,13 @@ import (
 
 // DeleteActor executes the workflow to delete an actor. Idempotent.
 func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.ActorRef, anyState bool, precondition store.DeletePreconditions) (*ateapipb.Actor, error) {
+	return w.deleteActor(ctx, actorRef, anyState, precondition, w.acquireActorLease)
+}
+
+// deleteActor is DeleteActor under the lease that acquire takes.
+func (w *ActorWorkflow) deleteActor(ctx context.Context, actorRef resources.ActorRef, anyState bool, precondition store.DeletePreconditions, acquire actorLeaseAcquirer) (*ateapipb.Actor, error) {
 	ctx = preview.ContextWithOptIn(ctx)
-	ctx, lease, err := w.acquireActorLease(ctx, actorRef)
+	ctx, lease, err := acquire(ctx, actorRef)
 	if err != nil {
 		return nil, err
 	}

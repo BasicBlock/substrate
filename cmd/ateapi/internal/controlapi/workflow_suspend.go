@@ -37,7 +37,12 @@ import (
 // snapshot is uploaded. Idempotent: a re-entered workflow fast-forwards past
 // the steps a previous attempt completed, deriving progress from the
 // persisted actor alone.
-func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error) {
+	return w.suspendActor(ctx, actorRef, w.acquireActorLease)
+}
+
+// suspendActor is SuspendActor under the lease that acquire takes.
+func (w *ActorWorkflow) suspendActor(ctx context.Context, actorRef resources.ActorRef, acquire actorLeaseAcquirer) (_ *ateapipb.Actor, err error) {
 	ctx = preview.ContextWithOptIn(ctx)
 	start := time.Now()
 	var actor *ateapipb.Actor
@@ -55,7 +60,7 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 		w.instruments.recordLifecycleOp(ctx, ateattr.OperationSuspend, start, err, attrs...)
 	}()
 
-	leaseCtx, lease, err := w.acquireActorLease(ctx, actorRef)
+	leaseCtx, lease, err := acquire(ctx, actorRef)
 	if err != nil {
 		return nil, err
 	}

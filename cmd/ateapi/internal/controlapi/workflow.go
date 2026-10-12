@@ -243,6 +243,21 @@ func (w *ActorWorkflow) acquireActorLease(ctx context.Context, actorRef resource
 	return acquireLease(ctx, w.store, actorLeaseKey(actorRef), "actor")
 }
 
+// actorLeaseAcquirer takes the lease an actor workflow runs under, as
+// acquireActorLease does. A workflow takes it as a parameter so that
+// RedriveActor, which must decide under the lease whether to run a workflow at
+// all, can hand it the lease it already holds.
+type actorLeaseAcquirer func(ctx context.Context, actorRef resources.ActorRef) (context.Context, *store.Lease, error)
+
+// holdingActorLease returns the acquirer for a caller that holds the actor's
+// lease already, under leaseCtx. The workflow runs under that context, and the
+// lease it gets back releases nothing: the caller owns the real one.
+func holdingActorLease(leaseCtx context.Context) actorLeaseAcquirer {
+	return func(context.Context, resources.ActorRef) (context.Context, *store.Lease, error) {
+		return leaseCtx, store.NewLease(leaseCtx, func() {}), nil
+	}
+}
+
 func acquireTagLease(ctx context.Context, holder leaseHolder, tagRef resources.TagRef) (context.Context, *store.Lease, error) {
 	return acquireLease(ctx, holder, "lease:tag:"+tagRef.Atespace+":"+tagRef.Name, "Tag")
 }
