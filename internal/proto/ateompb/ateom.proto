@@ -343,6 +343,14 @@ message CheckpointWorkloadResponse {
   // data_snapshot_files is the subset of snapshot_files that restores the
   // actor at VOLUMES fidelity on its own. Empty when the capture holds no durable data.
   repeated string data_snapshot_files = 2;
+
+  // rootfs_snapshot_files is the subset of snapshot_files that restores the
+  // actor at ROOTFS fidelity on its own: the root filesystem changes and the
+  // durable data, without process memory. Empty when the capture holds no
+  // restorable root filesystem, as for a MEMORY capture of a runtime that
+  // cannot take one beside the memory image, or one whose root filesystem
+  // capture failed.
+  repeated string rootfs_snapshot_files = 3;
 }
 
 message RestoreWorkloadRequest {
