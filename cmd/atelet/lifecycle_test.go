@@ -28,6 +28,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ateletpath"
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/trustbundle"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
@@ -791,20 +792,11 @@ func TestTerminateWithoutSandboxRecord(t *testing.T) {
 	}
 }
 
-// pausedActorForRestore runs an actor through Run and a local MEMORY
-// Checkpoint (a pause) against ateom, and returns what a Restore of it needs.
-func pausedActorForRestore(t *testing.T, ateom *fakeAteom) (s *AteomHerder, restore *ateletpb.RestoreRequest) {
+// runningActor runs an actor through Run against ateom and returns the atelet
+// and the requests the rest of its lifecycle needs.
+func runningActor(t *testing.T, ateom *fakeAteom) (s *AteomHerder, base lifecycleRequests) {
 	t.Helper()
 	useTempNodeDirs(t)
-	ctx := t.Context()
-
-	const (
-		atespace     = "ate-demo"
-		actorName    = "counter"
-		actorUID     = "actor-uid-1"
-		workerPodUID = "worker-pod-uid-1"
-		snapshotName = "pause-snap-1"
-	)
 	serveFakeAteom(t, ateom)
 
 	host := imageVolumeTestRegistry(t)
@@ -818,44 +810,67 @@ func pausedActorForRestore(t *testing.T, ateom *fakeAteom) (s *AteomHerder, rest
 		anonGCSClient:     fakeObjectStorage{data: runsc},
 		systemInfoVolumes: newSystemInfoVolumeRefresher(nil, nil),
 	}
-	sandboxAssets := &ateletpb.SandboxAssets{
-		SandboxClass: "gvisor",
-		PauseImage:   image,
-		Assets: map[string]*ateletpb.ArchAssets{
-			runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
-				runscAssetName: {
-					Url:    "gs://test-bucket/runsc",
-					Sha256: fmt.Sprintf("%x", sha256.Sum256(runsc)),
-				},
-			}},
+	base = lifecycleRequests{
+		atespace: "ate-demo", actorName: "counter", actorUID: "actor-uid-1", workerPodUID: "worker-pod-uid-1",
+		sandboxAssets: &ateletpb.SandboxAssets{
+			SandboxClass: "gvisor",
+			PauseImage:   image,
+			Assets: map[string]*ateletpb.ArchAssets{
+				runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
+					runscAssetName: {
+						Url:    "gs://test-bucket/runsc",
+						Sha256: fmt.Sprintf("%x", sha256.Sum256(runsc)),
+					},
+				}},
+			},
+		},
+		spec: &ateletpb.WorkloadSpec{
+			Containers: []*ateletpb.Container{{Name: "app", Image: image, Command: []string{"/bin/app"}}},
 		},
 	}
-	spec := &ateletpb.WorkloadSpec{
-		Containers: []*ateletpb.Container{{Name: "app", Image: image, Command: []string{"/bin/app"}}},
-	}
-	if _, err := s.Run(ctx, &ateletpb.RunRequest{
-		Atespace: atespace, ActorName: actorName, ActorUid: actorUID,
+	if _, err := s.Run(t.Context(), &ateletpb.RunRequest{
+		Atespace: base.atespace, ActorName: base.actorName, ActorUid: base.actorUID,
 		ActorTemplateAtespace: "default", ActorTemplateName: "counter",
-		WorkerPodUid: workerPodUID, SandboxAssets: sandboxAssets, Spec: spec,
+		WorkerPodUid: base.workerPodUID, SandboxAssets: base.sandboxAssets, Spec: base.spec,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, err := s.Checkpoint(ctx, &ateletpb.CheckpointRequest{
-		Atespace: atespace, ActorName: actorName, ActorUid: actorUID,
+	return s, base
+}
+
+// lifecycleRequests holds what the requests of one actor's lifecycle share.
+type lifecycleRequests struct {
+	atespace, actorName, actorUID, workerPodUID string
+	sandboxAssets                               *ateletpb.SandboxAssets
+	spec                                        *ateletpb.WorkloadSpec
+}
+
+func (b lifecycleRequests) checkpoint(fidelity ateletpb.SnapshotFidelity) *ateletpb.CheckpointRequest {
+	return &ateletpb.CheckpointRequest{
+		Atespace: b.atespace, ActorName: b.actorName, ActorUid: b.actorUID,
 		ActorTemplateAtespace: "default", ActorTemplateName: "counter",
-		WorkerPodUid: workerPodUID, Spec: spec,
-		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		Type:     ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-		Config: &ateletpb.CheckpointRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
-		},
-	}); err != nil {
+		WorkerPodUid: b.workerPodUID, Spec: b.spec, Fidelity: fidelity,
+	}
+}
+
+// pausedActorForRestore runs an actor through Run and a local MEMORY
+// Checkpoint (a pause) against ateom, and returns what a Restore of it needs.
+func pausedActorForRestore(t *testing.T, ateom *fakeAteom) (s *AteomHerder, restore *ateletpb.RestoreRequest) {
+	t.Helper()
+	const snapshotName = "pause-snap-1"
+	s, base := runningActor(t, ateom)
+	pause := base.checkpoint(ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	pause.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
+	pause.Config = &ateletpb.CheckpointRequest_LocalConfig{
+		LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+	}
+	if _, err := s.Checkpoint(t.Context(), pause); err != nil {
 		t.Fatalf("Checkpoint: %v", err)
 	}
 	return s, &ateletpb.RestoreRequest{
-		Atespace: atespace, ActorName: actorName, ActorUid: actorUID,
+		Atespace: base.atespace, ActorName: base.actorName, ActorUid: base.actorUID,
 		ActorTemplateAtespace: "default", ActorTemplateName: "counter",
-		WorkerPodUid: workerPodUID, SandboxAssets: sandboxAssets, Spec: spec,
+		WorkerPodUid: base.workerPodUID, SandboxAssets: base.sandboxAssets, Spec: base.spec,
 		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		Type:     ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
 		Config: &ateletpb.RestoreRequest_LocalConfig{
@@ -937,5 +952,69 @@ func TestCanFallBackToRootfs(t *testing.T) {
 				t.Errorf("canFallBackToRootfs() = %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+// An external checkpoint whose upload fails keeps its files on the node as a
+// local snapshot named after the snapshot URI, and says so, instead of failing:
+// ateom has stopped the workload, so they are the only copy of its state.
+func TestCheckpointKeepsTheSnapshotOnTheNodeWhenTheUploadFails(t *testing.T) {
+	ateom := &fakeAteom{snapshotFiles: map[string]string{"checkpoint.img": "guest-memory"}}
+	s, base := runningActor(t, ateom)
+	store := &failingPutStorage{orderedObjectStorage: &orderedObjectStorage{}, failOn: "checkpoint.img"}
+	plugin := newPluginHerder(t, store)
+	s.snapshotPlugin, s.snapshotScratchDir = plugin.snapshotPlugin, plugin.snapshotScratchDir
+
+	req := base.checkpoint(ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	req.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL
+	req.Config = &ateletpb.CheckpointRequest_ExternalConfig{
+		ExternalConfig: &ateletpb.ExternalCheckpointConfiguration{SnapshotUri: pausedSnapshotURI},
+	}
+	resp, err := s.Checkpoint(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Checkpoint: %v, want the kept snapshot reported on the response", err)
+	}
+	if !resp.GetSnapshotKeptOnNode() {
+		t.Fatal("SnapshotKeptOnNode = false, want true")
+	}
+
+	uri, err := resources.ParseSnapshotURI(pausedSnapshotURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := ateletpath.LocalSnapshotDir(base.actorUID, uri.Name())
+	if got, err := os.ReadFile(filepath.Join(kept, "checkpoint.img")); err != nil || string(got) != "guest-memory" {
+		t.Errorf("kept checkpoint.img = %q, %v; want the checkpoint", got, err)
+	}
+	manifest, err := readSnapshotManifest(kept)
+	if err != nil {
+		t.Fatalf("kept snapshot has no manifest: %v", err)
+	}
+	rec, err := unmarshalSandboxRecord(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Fidelity != ateattr.SnapshotFidelityMemory || !slices.Equal(rec.SnapshotFiles, []string{"checkpoint.img"}) {
+		t.Errorf("kept manifest = %+v, want the MEMORY checkpoint's files", rec)
+	}
+}
+
+// A golden actor is never paused, so its failed upload is an error, not a
+// kept snapshot.
+func TestCheckpointDoesNotKeepAGoldenActorsSnapshot(t *testing.T) {
+	ateom := &fakeAteom{snapshotFiles: map[string]string{"checkpoint.img": "guest-memory"}}
+	s, base := runningActor(t, ateom)
+	store := &failingPutStorage{orderedObjectStorage: &orderedObjectStorage{}, failOn: "checkpoint.img"}
+	plugin := newPluginHerder(t, store)
+	s.snapshotPlugin, s.snapshotScratchDir = plugin.snapshotPlugin, plugin.snapshotScratchDir
+
+	req := base.checkpoint(ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	req.Atespace = resources.GoldenActorAtespace
+	req.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL
+	req.Config = &ateletpb.CheckpointRequest_ExternalConfig{
+		ExternalConfig: &ateletpb.ExternalCheckpointConfiguration{SnapshotUri: pausedSnapshotURI},
+	}
+	if _, err := s.Checkpoint(t.Context(), req); err == nil {
+		t.Fatal("Checkpoint succeeded, want the upload failure for a golden actor")
 	}
 }

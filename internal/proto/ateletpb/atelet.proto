@@ -583,6 +583,12 @@ message CheckpointRequest {
 }
 
 message CheckpointResponse {
+  // snapshot_kept_on_node is set on an EXTERNAL checkpoint that stopped the
+  // workload but could not upload its snapshot: atelet kept the files on the
+  // node as a local snapshot named after the snapshot URI's last segment,
+  // where they are the only copy of the actor's state. The control plane
+  // records the actor PAUSED on this node, and a later suspend uploads them.
+  bool snapshot_kept_on_node = 1;
 }
 
 message UploadPausedCheckpointRequest {

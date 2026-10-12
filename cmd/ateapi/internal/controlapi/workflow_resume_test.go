@@ -1044,6 +1044,14 @@ type capturingAtelet struct {
 	// dropSnapshotMemoryErr, when set, what the RPC fails with.
 	dropSnapshotMemory    *ateletpb.DropSnapshotMemoryRequest
 	dropSnapshotMemoryErr error
+	// checkpointErr and checkpointKeptOnNode set what Checkpoint answers: an
+	// error, or a response saying atelet kept the snapshot on the node.
+	// uploadPaused is the last UploadPausedCheckpoint request, and
+	// uploadPausedErr what that RPC fails with.
+	checkpointErr        error
+	checkpointKeptOnNode bool
+	uploadPaused         *ateletpb.UploadPausedCheckpointRequest
+	uploadPausedErr      error
 }
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
@@ -1064,7 +1072,44 @@ func (f *capturingAtelet) Checkpoint(ctx context.Context, req *ateletpb.Checkpoi
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.checkpoint = proto.Clone(req).(*ateletpb.CheckpointRequest)
-	return &ateletpb.CheckpointResponse{}, nil
+	if f.checkpointErr != nil {
+		return nil, f.checkpointErr
+	}
+	return &ateletpb.CheckpointResponse{SnapshotKeptOnNode: f.checkpointKeptOnNode}, nil
+}
+
+func (f *capturingAtelet) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.UploadPausedCheckpointRequest) (*ateletpb.UploadPausedCheckpointResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.uploadPaused = proto.Clone(req).(*ateletpb.UploadPausedCheckpointRequest)
+	if f.uploadPausedErr != nil {
+		return nil, f.uploadPausedErr
+	}
+	return &ateletpb.UploadPausedCheckpointResponse{}, nil
+}
+
+// setSuspendErrs sets what Checkpoint and UploadPausedCheckpoint fail with.
+func (f *capturingAtelet) setSuspendErrs(checkpointErr, uploadPausedErr error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkpointErr = checkpointErr
+	f.checkpointKeptOnNode = false
+	f.uploadPausedErr = uploadPausedErr
+}
+
+// setCheckpointKeptOnNode makes Checkpoint answer that the snapshot was kept
+// on the node.
+func (f *capturingAtelet) setCheckpointKeptOnNode() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkpointErr = nil
+	f.checkpointKeptOnNode = true
+}
+
+func (f *capturingAtelet) lastUploadPaused() *ateletpb.UploadPausedCheckpointRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.uploadPaused
 }
 
 func (f *capturingAtelet) DropSnapshotMemory(ctx context.Context, req *ateletpb.DropSnapshotMemoryRequest) (*ateletpb.DropSnapshotMemoryResponse, error) {
