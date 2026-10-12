@@ -607,6 +607,7 @@ Hibernate a running actor, capturing its current RAM and disk state into a snaps
 *   **Request:** `SuspendActorRequest`
     *   `actor`: `ObjectRef` of the actor to suspend.
 *   **Response:** `SuspendActorResponse` containing the `Actor` object in `ACTOR_STATE_SUSPENDED`, with its snapshot in `status.snapshots`.
+*   If a suspend's upload to snapshot storage fails after the workload has stopped, atelet keeps the checkpoint on the node as a local snapshot and the actor is recorded `ACTOR_STATE_PAUSED` there, with `UNAVAILABLE` returned to the caller: nothing is lost, and calling `SuspendActor` again uploads the kept snapshot to the same location. A suspend of a paused actor whose upload fails for a reason that is not transient also returns it to `PAUSED`, unless atelet reports the snapshot gone, which crashes it. Golden actors, which are never paused, crash as before.
 *   A successful suspend releases the actor's previous external snapshot: an actor keeps one, and only tags outlive it. To keep the snapshot a suspend just wrote, tag it with `CreateTag` while the actor is still suspended.
 
 #### Snapshot lifetime

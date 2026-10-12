@@ -2835,9 +2835,15 @@ func (*CheckpointRequest_LocalConfig) isCheckpointRequest_Config() {}
 func (*CheckpointRequest_ExternalConfig) isCheckpointRequest_Config() {}
 
 type CheckpointResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// snapshot_kept_on_node is set on an EXTERNAL checkpoint that stopped the
+	// workload but could not upload its snapshot: atelet kept the files on the
+	// node as a local snapshot named after the snapshot URI's last segment,
+	// where they are the only copy of the actor's state. The control plane
+	// records the actor PAUSED on this node, and a later suspend uploads them.
+	SnapshotKeptOnNode bool `protobuf:"varint,1,opt,name=snapshot_kept_on_node,json=snapshotKeptOnNode,proto3" json:"snapshot_kept_on_node,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *CheckpointResponse) Reset() {
@@ -2868,6 +2874,13 @@ func (x *CheckpointResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use CheckpointResponse.ProtoReflect.Descriptor instead.
 func (*CheckpointResponse) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *CheckpointResponse) GetSnapshotKeptOnNode() bool {
+	if x != nil {
+		return x.SnapshotKeptOnNode
+	}
+	return false
 }
 
 type UploadPausedCheckpointRequest struct {
@@ -3442,8 +3455,9 @@ const file_atelet_proto_rawDesc = "" +
 	"\x0fexternal_config\x18\n" +
 	" \x01(\v2'.atelet.ExternalCheckpointConfigurationH\x00R\x0eexternalConfig\x124\n" +
 	"\bfidelity\x18\v \x01(\x0e2\x18.atelet.SnapshotFidelityR\bfidelityB\b\n" +
-	"\x06config\"\x14\n" +
-	"\x12CheckpointResponse\"\x8e\x03\n" +
+	"\x06config\"G\n" +
+	"\x12CheckpointResponse\x121\n" +
+	"\x15snapshot_kept_on_node\x18\x01 \x01(\bR\x12snapshotKeptOnNode\"\x8e\x03\n" +
 	"\x1dUploadPausedCheckpointRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
