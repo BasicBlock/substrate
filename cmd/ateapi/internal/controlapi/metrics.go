@@ -33,6 +33,7 @@ const (
 	lifecycleOpDurationMetric = "ate.actor.lifecycle.operation.duration"
 	schedulerAssignmentMetric = "ate.scheduler.assignment.duration"
 	actorCrashesMetric        = "ate.actor.crashes"
+	actorRedrivesMetric       = "ate.actor.redrives"
 )
 
 var actorCrashesCounter metric.Int64Counter
@@ -145,18 +146,21 @@ func workerState(w *ateapipb.Worker) string {
 	}
 }
 
-// Instruments holds ateapi's actor-lifecycle and scheduler duration histograms.
+// Instruments holds ateapi's actor-lifecycle and scheduler duration histograms
+// and its stranded-actor re-drive counter.
 // A nil *Instruments is a valid no-op, so call sites need no guard. Worker-count
 // is registered separately (RegisterWorkerCount): a callback-driven observable,
 // not a synchronous instrument.
 type Instruments struct {
 	lifecycleOpDuration         metric.Float64Histogram
 	schedulerAssignmentDuration metric.Float64Histogram
+	actorRedrives               metric.Int64Counter
 }
 
-// NewInstruments builds the two histograms against meter. Assignment buckets are
-// finer than lifecycle's (a cache pick plus a few store writes, not a
-// multi-second restore) but reach 5s so store latency spikes stay measurable.
+// NewInstruments builds the two histograms and the re-drive counter against
+// meter. Assignment buckets are finer than lifecycle's (a cache pick plus a few
+// store writes, not a multi-second restore) but reach 5s so store latency
+// spikes stay measurable.
 func NewInstruments(meter metric.Meter) (*Instruments, error) {
 	lifecycleOpDuration, err := meter.Float64Histogram(
 		lifecycleOpDurationMetric,
@@ -178,10 +182,34 @@ func NewInstruments(meter metric.Meter) (*Instruments, error) {
 		return nil, fmt.Errorf("create %s histogram: %w", schedulerAssignmentMetric, err)
 	}
 
+	actorRedrives, err := meter.Int64Counter(
+		actorRedrivesMetric,
+		metric.WithUnit("{redrive}"),
+		metric.WithDescription("Number of attempts to finish an actor operation that no workflow was running, by operation and outcome."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create %s counter: %w", actorRedrivesMetric, err)
+	}
+
 	return &Instruments{
 		lifecycleOpDuration:         lifecycleOpDuration,
 		schedulerAssignmentDuration: schedulerAssignmentDuration,
+		actorRedrives:               actorRedrives,
 	}, nil
+}
+
+// recordRedrive counts one attempt to finish an operation an actor was left in
+// the middle of. operation is the lifecycle operation the actor's state called
+// for (ateattr.Operation*), outcome one of ateattr.RedriveOutcome*. Actor
+// identity is on the log record, not here.
+func (i *Instruments) recordRedrive(ctx context.Context, operation, outcome string) {
+	if i == nil || i.actorRedrives == nil {
+		return
+	}
+	i.actorRedrives.Add(ctx, 1, metric.WithAttributes(
+		ateattr.ActorOperationNameKey.String(ateattr.NormalizeOperationName(operation)),
+		ateattr.ActorRedriveOutcomeKey.String(outcome),
+	))
 }
 
 // recordLifecycleOp records op's duration. A non-nil err is classified onto
