@@ -150,8 +150,7 @@ const (
 	// from the OCI image with the volumes restored.
 	SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES SnapshotFidelity = 1
 	// Volumes plus the root filesystem changes made since boot. The actor
-	// cold-boots on resume with its rootfs writes back in place. Served by the
-	// micro-VM sandbox class only.
+	// cold-boots on resume with its rootfs writes back in place.
 	SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS SnapshotFidelity = 2
 	// Volumes, root filesystem changes, and process memory. The actor resumes
 	// where it left off.
@@ -3024,8 +3023,7 @@ type SnapshotConfig struct {
 	// more than this level, and it may package less when a layer cannot be
 	// captured or is too expensive to capture at the time, for example memory
 	// under host pressure. A process resumed in place on its worker keeps its
-	// memory regardless of this setting. ROOTFS requires
-	// sandbox_config.sandbox_class SANDBOX_CLASS_MICROVM. Defaults to MEMORY
+	// memory regardless of this setting. Defaults to MEMORY
 	// when unset.
 	//
 	// +k8s:required
@@ -4511,7 +4509,7 @@ type CreateActorTemplateRequest struct {
 	// version, timestamps) is ignored, as are the status fields.
 	//
 	// +k8s:required
-	// +k8s:customValidation # volume_mounts must reference declared volumes; ROOTFS fidelity requires the micro-VM sandbox class
+	// +k8s:customValidation # volume_mounts must reference declared volumes
 	ActorTemplate *ActorTemplate `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

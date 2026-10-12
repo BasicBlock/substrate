@@ -63,18 +63,9 @@ func ValidateActorTemplateUpdate(ctx context.Context, fldPath *field.Path, newVa
 
 // ValidateCustom_CreateActorTemplateRequest_ActorTemplate holds the rules
 // that span more than one field of a template: container volume mounts must
-// reference volumes the template declares, and a ROOTFS preferred fidelity
-// needs a sandbox class that can capture rootfs changes without memory, which
-// today is the micro-VM class alone.
+// reference volumes the template declares.
 func ValidateCustom_CreateActorTemplateRequest_ActorTemplate(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.ActorTemplate) field.ErrorList {
 	var errs field.ErrorList
-	if value.GetSnapshotConfig().GetPreferredFidelity() == ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS &&
-		value.GetSandboxConfig().GetSandboxClass() != ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM {
-		errs = append(errs, field.Invalid(
-			fldPath.Child("snapshot_config", "preferred_fidelity"),
-			value.GetSnapshotConfig().GetPreferredFidelity().String(),
-			"ROOTFS fidelity requires sandbox_config.sandbox_class SANDBOX_CLASS_MICROVM"))
-	}
 	declared := make(map[string]bool, len(value.GetVolumes()))
 	for _, vol := range value.GetVolumes() {
 		declared[vol.GetName()] = true

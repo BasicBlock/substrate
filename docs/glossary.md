@@ -119,11 +119,13 @@ for etcd.
     afresh from the OCI image with the `DurableDir` contents restored.
   - **`ROOTFS`**: volumes plus the root filesystem changes made since boot.
     Process memory is discarded; on Resume the containers cold-boot from the
-    OCI image with their rootfs writes back in place. Served by the micro-VM
-    sandbox class only: gVisor keeps rootfs changes inside its memory
-    checkpoint, so a gVisor template that requests it is rejected.
+    OCI image with their rootfs writes back in place. gVisor takes it with
+    `runsc fscheckpoint`; the micro-VM class ships the writable upper as a tar.
   - **`MEMORY`**: volumes, rootfs changes, and process memory. Used to
-    capture everything needed to resume hot.
+    capture everything needed to resume hot. A gVisor `MEMORY` snapshot also
+    carries its `ROOTFS` image, so a resume whose memory image cannot be
+    restored (a changed worker, `runsc` or CPU) cold-boots from the rootfs
+    instead of crashing the actor.
 
   Fidelity describes only what a snapshot *holds*. A template sets one
   level, `preferredFidelity`, the ceiling for every snapshot of its actors:

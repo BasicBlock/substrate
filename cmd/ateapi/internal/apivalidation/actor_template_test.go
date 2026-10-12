@@ -69,13 +69,12 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 		})},
 		nil,
 	}, {
-		// Only the micro-VM runtime captures rootfs changes without memory;
-		// the fixture is a gVisor template.
-		"rootfs fidelity on gvisor rejected",
+		// Both sandbox classes serve ROOTFS; the fixture is a gVisor template.
+		"rootfs fidelity on gvisor accepted",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.SnapshotConfig.PreferredFidelity = ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 		})},
-		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshot_config", "preferred_fidelity"), "SNAPSHOT_FIDELITY_ROOTFS", "")},
+		nil,
 	}, {
 		"rootfs fidelity on microvm accepted",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
