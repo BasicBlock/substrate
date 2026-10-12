@@ -498,6 +498,36 @@ By default, only actors in `ACTOR_STATE_SUSPENDED` or `ACTOR_STATE_CRASHED` stat
 
 After deletion, the state of the actor (i.e., memory+disk snapshots) is garbage collected.
 
+### Phase 5: Stranded Operations
+
+Suspend, pause, revert and delete each commit their transitional state
+(`ACTOR_STATE_SUSPENDING`, `ACTOR_STATE_PAUSING`, `ACTOR_STATE_REVERTING`,
+`ACTOR_STATE_DELETING`) before doing the work, under a per-actor lease. When
+the process running the workflow goes away first (a restart that outlasts the
+drain, a crash, a lost node) or its caller cancels it, the actor stays in that
+state, and every other operation on it is refused.
+
+Each ate-api replica therefore sweeps the actors, and re-runs the operation of
+any actor in one of these four states that no replica has written for
+`--stranded-actor-min-age` (5 minutes by default). The re-drive takes the
+actor's lease, so it never runs beside a workflow that is alive, and reads the
+actor again under it, so it never acts on a decision gone stale. A re-drive
+that fails is retried after a delay that doubles from 1 to 30 minutes.
+`--enable-stranded-actor-redrive=false` turns it off.
+
+The workflows are re-entrant, so a re-drive continues where the first attempt
+stopped. The exception is a suspend or pause whose first attempt already took
+the checkpoint: the workload is gone, so the second `Checkpoint` fails and the
+actor is `ACTOR_STATE_CRASHED`, like any other failed checkpoint, and
+`RevertActor` returns it to its last durable snapshot. A suspend whose snapshot
+atelet could not upload and kept on its node is finished the way the suspend
+would have: the actor is `ACTOR_STATE_PAUSED` on that node, and suspending it
+again retries the upload.
+
+An actor in `ACTOR_STATE_RESUMING` is not re-driven. A resume is driven by the
+next request, and `ResumeActor` re-enters it; re-driving it with no one waiting
+would start a workload nobody asked for.
+
 ## State Management & Persistence
 
 Agent Substrate distinguishes between two types of state, which are currently
