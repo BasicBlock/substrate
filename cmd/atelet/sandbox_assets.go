@@ -109,6 +109,10 @@ type sandboxAssetsRecord struct {
 	// durable data, without process memory. Empty when the capture holds no
 	// restorable root filesystem.
 	RootfsSnapshotFiles []string `json:"rootfsSnapshotFiles,omitempty"`
+	// DroppedSnapshotFiles are the memory files a DropSnapshotMemory removed
+	// from SnapshotFiles and has not yet finished emptying in object storage.
+	// Empty once it has.
+	DroppedSnapshotFiles []string `json:"droppedSnapshotFiles,omitempty"`
 	// Fidelity is the snapshot fidelity the checkpoint captured, as the shared
 	// ateattr label ("volumes", "rootfs", or "memory"), so a snapshot's content
 	// is knowable from the manifest alone. Empty in the on-node record written at
@@ -515,6 +519,9 @@ func unmarshalSandboxRecord(data []byte) (*sandboxAssetsRecord, error) {
 	}
 	if err := validateRootfsSnapshotFiles(rec.SnapshotFiles, rec.RootfsSnapshotFiles); err != nil {
 		return nil, fmt.Errorf("sandbox record/manifest has invalid rootfsSnapshotFiles: %w", err)
+	}
+	if err := validateSnapshotFiles(rec.DroppedSnapshotFiles); err != nil {
+		return nil, fmt.Errorf("sandbox record/manifest has invalid droppedSnapshotFiles: %w", err)
 	}
 	return rec, nil
 }

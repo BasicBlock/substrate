@@ -259,6 +259,25 @@ service AteomHerder {
   // Terminate tells atelet to terminate/kill any running workload for an actor,
   // unmount its volumes, and clean up actor state on the node.
   rpc Terminate(TerminateRequest) returns (TerminateResponse) {}
+
+  // DropSnapshotMemory rewrites a stored external MEMORY snapshot in place
+  // into a ROOTFS one: the manifest lists only the root filesystem and durable
+  // data, and the memory objects are emptied. It drives no ateom, it only
+  // moves bytes through the snapshot plugin, so any atelet can serve it, not
+  // only one on the actor's (long gone) node. Refuses a snapshot that is not
+  // MEMORY, or that holds no root filesystem. Idempotent: a snapshot already
+  // ROOTFS succeeds, finishing the emptying of memory objects a previous call
+  // left behind.
+  rpc DropSnapshotMemory(DropSnapshotMemoryRequest) returns (DropSnapshotMemoryResponse) {}
+}
+
+message DropSnapshotMemoryRequest {
+  // The object storage URI of the external snapshot to downgrade from MEMORY
+  // to ROOTFS.
+  string snapshot_uri = 1;
+}
+
+message DropSnapshotMemoryResponse {
 }
 
 message TerminateRequest {

@@ -261,6 +261,9 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapipb.Control_PauseActor_FullMethodName:   onNamedActor[*ateapipb.PauseActorRequest](RelationCanSuspend),
 	ateapipb.Control_ResumeActor_FullMethodName:  onNamedActor[*ateapipb.ResumeActorRequest](RelationCanResume),
 	ateapipb.Control_RevertActor_FullMethodName:  onNamedActor[*ateapipb.RevertActorRequest](RelationCanRevert),
+	// Dropping a snapshot's memory manages the actor's stored state: the same
+	// authority as suspending it.
+	ateapipb.Control_DropSnapshotMemory_FullMethodName: onNamedActor[*ateapipb.DropSnapshotMemoryRequest](RelationCanSuspend),
 
 	// Egress policies belong to their actor: reading one needs can_get on it,
 	// changing one can_update.
