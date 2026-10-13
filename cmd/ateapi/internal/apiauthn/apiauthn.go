@@ -168,27 +168,43 @@ func (a jwtServerAuthenticator) authenticate(ctx context.Context) (context.Conte
 	if !ok {
 		return nil, status.Error(codes.Unauthenticated, "missing bearer token")
 	}
-	issuer, err := unverifiedIssuer(bearer)
+	p, err := a.verifyToken(ctx, bearer)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "invalid bearer token")
+		return nil, err
+	}
+	return principal.InjectContext(ctx, p), nil
+}
+
+// verifyToken authenticates a token with the provider for its issuer.
+func (a jwtServerAuthenticator) verifyToken(ctx context.Context, token string) (principal.PrincipalInfo, error) {
+	issuer, err := unverifiedIssuer(token)
+	if err != nil {
+		return principal.PrincipalInfo{}, status.Error(codes.Unauthenticated, "invalid bearer token")
 	}
 	for _, provider := range a.providers {
 		if provider.Issuer != issuer {
 			continue
 		}
-		id, err := provider.Verify(ctx, bearer)
+		id, err := provider.Verify(ctx, token)
 		if err != nil {
 			slog.DebugContext(ctx, "JWT verification failed", slog.String("provider", provider.Name), slog.Any("err", err))
-			return nil, status.Error(codes.Unauthenticated, "invalid bearer token")
+			return principal.PrincipalInfo{}, status.Error(codes.Unauthenticated, "invalid bearer token")
 		}
-		return principal.InjectContext(ctx, principal.PrincipalInfo{
+		return principal.PrincipalInfo{
 			ID:     id,
 			Kind:   principal.KindJWT,
 			Issuer: provider.Issuer,
-		}), nil
+		}, nil
 	}
 	slog.DebugContext(ctx, "No JWT provider matched token issuer", slog.String("issuer", issuer))
-	return nil, status.Errorf(codes.Unauthenticated, "token issuer %q not trusted", issuer)
+	return principal.PrincipalInfo{}, status.Errorf(codes.Unauthenticated, "token issuer %q not trusted", issuer)
+}
+
+// Authenticate returns the principal a token identifies, as a call bearing it
+// would be authenticated. The ingress gateway presents its clients' tokens
+// through CheckActorAccess.
+func (cfg ServerConfig) Authenticate(ctx context.Context, token string) (principal.PrincipalInfo, error) {
+	return jwtServerAuthenticator{providers: cfg.JWTProviders}.verifyToken(ctx, token)
 }
 
 func unverifiedIssuer(token string) (string, error) {

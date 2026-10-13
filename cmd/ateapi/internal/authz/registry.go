@@ -310,6 +310,10 @@ var defaultRPCPermissions = map[string]rpcRule{
 		return onWorker(RelationCanListActorAssignments, r.GetWorker().GetName(), field.NewPath("worker", "name"))
 	})),
 
+	// The ingress gateway asks on its clients' behalf; the answer checks the
+	// client's can_connect, and would otherwise reveal whether a token is valid.
+	ateapipb.Control_CheckActorAccess_FullMethodName: onGlobalOf[*ateapipb.CheckActorAccessRequest](RoleOwner),
+
 	// Actor credentials are minted for Substrate's own components (the egress
 	// gateway and atelet); only a global owner may ask for one.
 	ateapipb.Control_MintActorJWT_FullMethodName:         onGlobalOf[*ateapipb.MintActorJWTRequest](RoleOwner),
