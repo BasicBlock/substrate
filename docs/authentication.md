@@ -48,6 +48,16 @@ whose users should have full control of the entire control plane: every
 atespace, actor, actor template, egress policy, snapshot and worker in the
 cluster.
 
+## Ingress clients
+
+The ingress gateway (the atenet router) can authorize the clients of actors as
+well: with `--ingress-authorization=enforce` it calls `CheckActorAccess` with
+the token each client presents (in the headers `--ingress-token-headers`
+names), which ate-api authenticates like a call's own token and authorizes
+against `can_connect` on the actor: editor of its atespace or above, or a direct
+grant. Without `--experimental-enable-authz` every authenticated client may
+connect.
+
 ## Google Cloud CLI tokens
 
 The Google Cloud CLI currently issues user identity tokens with issuer

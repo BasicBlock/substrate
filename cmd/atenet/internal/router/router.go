@@ -199,7 +199,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create parking metrics: %w", err)
 		}
-		s.ingressHandler = ingress.New(s.apiClient, parkCfg, parkMetrics)
+		s.ingressHandler = ingress.New(s.apiClient, parkCfg, parkMetrics, ingress.WithAccess(s.cfg.IngressAccess, s.apiClient))
 		handlers[s.ingressHandler.Direction()] = s.ingressHandler
 	}
 	if s.cfg.Mode.ServesEgress() {
