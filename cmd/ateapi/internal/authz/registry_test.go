@@ -238,6 +238,66 @@ func TestDefaultRPCPermissions(t *testing.T) {
 			req:        &ateapipb.ListWorkerActorAssignmentsRequest{Worker: workerRef},
 			want:       []check{{RelationCanListActorAssignments, "worker:w-1"}},
 		},
+
+		// RPCs upstream leaves unregistered.
+		{
+			name:       "CreateActor from another atespace's tag also reads that atespace",
+			fullMethod: ateapipb.Control_CreateActor_FullMethodName,
+			req: &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+				Metadata: actorMeta, ActorTemplate: localTemplate,
+				SourceTag: &ateapipb.ObjectRef{Atespace: "team-b", Name: "golden"},
+			}},
+			want: []check{
+				{RelationCanCreateActor, "atespace:team-a"},
+				{RelationCanUseTemplate, "actor_template:team-a/tmpl"},
+				{RelationCanGet, "atespace:team-b"},
+			},
+		},
+		{
+			name:       "MintActorJWT needs a global owner",
+			fullMethod: ateapipb.Control_MintActorJWT_FullMethodName,
+			req:        &ateapipb.MintActorJWTRequest{},
+			want:       []check{{RoleOwner, GlobalRootObject}},
+		},
+		{
+			name:       "MintActorCertificate needs a global owner",
+			fullMethod: ateapipb.Control_MintActorCertificate_FullMethodName,
+			req:        &ateapipb.MintActorCertificateRequest{},
+			want:       []check{{RoleOwner, GlobalRootObject}},
+		},
+		{
+			name:       "CreateTag updates its atespace and reads its source actor",
+			fullMethod: ateapipb.Control_CreateTag_FullMethodName,
+			req: &ateapipb.CreateTagRequest{Tag: &ateapipb.Tag{
+				Metadata:    &ateapipb.ResourceMetadata{Atespace: "team-b", Name: "golden"},
+				SourceActor: actorRef,
+			}},
+			want: []check{{RelationCanUpdate, "atespace:team-b"}, {RelationCanGet, "actor:team-a/runner"}},
+		},
+		{
+			name:       "GetTag",
+			fullMethod: ateapipb.Control_GetTag_FullMethodName,
+			req:        &ateapipb.GetTagRequest{Tag: &ateapipb.ObjectRef{Atespace: "team-b", Name: "golden"}},
+			want:       []check{{RelationCanGet, "atespace:team-b"}},
+		},
+		{
+			name:       "ListTags across all atespaces",
+			fullMethod: ateapipb.Control_ListTags_FullMethodName,
+			req:        &ateapipb.ListTagsRequest{},
+			want:       []check{{RelationCanGet, GlobalRootObject}},
+		},
+		{
+			name:       "DeleteTag",
+			fullMethod: ateapipb.Control_DeleteTag_FullMethodName,
+			req:        &ateapipb.DeleteTagRequest{Tag: &ateapipb.ObjectRef{Atespace: "team-b", Name: "golden"}},
+			want:       []check{{RelationCanUpdate, "atespace:team-b"}},
+		},
+		{
+			name:       "RegisterWorker is left to its handler",
+			fullMethod: ateapipb.WorkerService_RegisterWorker_FullMethodName,
+			req:        &ateapipb.RegisterWorkerRequest{},
+			want:       nil,
+		},
 	}
 
 	for _, tc := range tests {
