@@ -621,7 +621,7 @@ func buildJWTProviders(ctx context.Context, cfg *apiauthn.AuthenticationConfig) 
 				if err != nil {
 					return "", err
 				}
-				return claims.Subject, nil
+				return providerCfg.Principal(claims.Raw)
 			},
 		})
 		slog.InfoContext(ctx, "Configured JWT provider", slog.String("name", providerCfg.Name), slog.String("issuer", providerCfg.Issuer))

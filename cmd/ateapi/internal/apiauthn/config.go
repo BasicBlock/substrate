@@ -35,6 +35,33 @@ type JWTProviderConfig struct {
 	Audiences                []string `json:"audiences"`
 	CertificateAuthorityFile string   `json:"certificateAuthorityFile,omitempty"`
 	DiscoveryTokenFile       string   `json:"discoveryTokenFile,omitempty"`
+
+	// PrincipalClaim names the string claim that identifies the principal:
+	// "sub" when empty, or for example "email" for Google identity tokens,
+	// whose subject is an opaque number. A provider that names principals by
+	// "email" admits only tokens whose email_verified claim is true.
+	PrincipalClaim string `json:"principalClaim,omitempty"`
+}
+
+// Principal returns the principal a verified token's claims identify: the
+// value of the provider's PrincipalClaim. It fails when that claim is missing
+// or empty, or when it is "email" and the token does not say the address is
+// verified, since an unverified address names nobody.
+func (p JWTProviderConfig) Principal(claims map[string]any) (string, error) {
+	claim := p.PrincipalClaim
+	if claim == "" {
+		claim = "sub"
+	}
+	id, ok := claims[claim].(string)
+	if !ok || id == "" {
+		return "", fmt.Errorf("token has no %q claim", claim)
+	}
+	if claim == "email" {
+		if verified, ok := claims["email_verified"]; !ok || (verified != true && verified != "true") {
+			return "", fmt.Errorf("token's email is not verified")
+		}
+	}
+	return id, nil
 }
 
 // LoadAuthenticationConfig strictly parses and validates a YAML or JSON file.
