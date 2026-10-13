@@ -313,6 +313,10 @@ var defaultRPCPermissions = map[string]rpcRule{
 	ateapipb.Control_MintActorCertificate_FullMethodName: rule(checksOf(func(r *ateapipb.MintActorCertificateRequest) ([]check, field.ErrorList) {
 		return onActor(RelationCanMintActorCertificate, r.GetActor(), field.NewPath("actor"))
 	})),
+	// The ingress gateway asks on its clients' behalf.
+	ateapipb.Control_CheckActorAccess_FullMethodName: rule(checksOf(func(*ateapipb.CheckActorAccessRequest) ([]check, field.ErrorList) {
+		return onGlobal(RoleOwner)
+	})),
 
 	// Tags. CreateTag stores the tag in its source actor's atespace, so that is
 	// the atespace checked. Validation also requires metadata.atespace to

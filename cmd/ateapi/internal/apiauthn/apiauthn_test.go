@@ -238,6 +238,27 @@ func TestJWTServerAuthenticatorTriesProviders(t *testing.T) {
 	}
 }
 
+// Authenticate verifies a token the caller holds, as CheckActorAccess does
+// for the ingress gateway's clients, exactly as a call bearing it would be.
+func TestServerConfigAuthenticate(t *testing.T) {
+	cfg := ServerConfig{JWTProviders: []JWTProvider{
+		{Name: "second", Issuer: "https://second.example", Verify: func(context.Context, string) (string, error) {
+			return "subject", nil
+		}},
+	}}
+	got, err := cfg.Authenticate(context.Background(), "e30.eyJpc3MiOiJodHRwczovL3NlY29uZC5leGFtcGxlIn0.eA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := principal.PrincipalInfo{ID: "subject", Kind: principal.KindJWT, Issuer: "https://second.example"}
+	if got != want {
+		t.Fatalf("principal = %+v, want %+v", got, want)
+	}
+	if _, err := cfg.Authenticate(context.Background(), testGoodToken); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("token from an untrusted issuer: err = %v, want Unauthenticated", err)
+	}
+}
+
 func TestBearerToken(t *testing.T) {
 	cases := []struct {
 		name  string

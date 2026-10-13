@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/actoraccess"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/apiauthn"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
@@ -371,7 +372,16 @@ func main() {
 		),
 	)
 	reflection.Register(mux)
-	ateapipb.RegisterControlServer(mux, controlSrv)
+	// CheckActorAccess's inner can_connect check only runs with
+	// --experimental-enable-authz: without it every authenticated principal
+	// may connect, as it may call every RPC. A nil *authz.Authorizer must reach
+	// actoraccess as a nil interface (a non-nil interface holding a nil pointer
+	// is not nil).
+	var accessAuthorizer actoraccess.Authorizer
+	if *experimentalEnableAuthz {
+		accessAuthorizer = authorizer
+	}
+	ateapipb.RegisterControlServer(mux, controlServer{RPCService: controlSrv, access: actoraccess.New(authCfg, accessAuthorizer)})
 	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence, controlSrv, ateletSPIFFEID, actorIDCAPool, *actorJWTIssuer, actorIDJWTAuthorityPool))
 
 	// Every RPC needs the store, so a replica that cannot reach it leaves the
@@ -389,6 +399,17 @@ func main() {
 	}
 	<-drainDone
 	slog.InfoContext(ctx, "Shutdown complete")
+}
+
+// controlServer adds CheckActorAccess, which needs ate-api's authentication
+// and authorization rather than the store, to the Control service.
+type controlServer struct {
+	*controlapi.RPCService
+	access *actoraccess.Checker
+}
+
+func (s controlServer) CheckActorAccess(ctx context.Context, req *ateapipb.CheckActorAccessRequest) (*ateapipb.CheckActorAccessResponse, error) {
+	return s.access.Check(ctx, req)
 }
 
 func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboot.Readiness) <-chan struct{} {
