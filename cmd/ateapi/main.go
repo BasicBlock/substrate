@@ -111,7 +111,7 @@ var (
 	templateResyncInterval = pflag.Duration("template-resync-interval", 20*time.Second, fmt.Sprintf("Interval between actor template resyncs. Must be at least %s.", minResyncInterval))
 
 	enableStrandedActorRedrive  = pflag.Bool("enable-stranded-actor-redrive", true, "Finish the suspend, pause, revert or delete of an actor that no workflow is running, such as one a restart of ateapi cut off. Turning it off leaves such an actor in its transitional state until its operation is called again.")
-	strandedActorMinAge         = pflag.Duration("stranded-actor-min-age", 5*time.Minute, "How long an actor in SUSPENDING, PAUSING, REVERTING or DELETING must have gone unwritten before ateapi re-drives its operation. It is the delay before a stranded actor is finished, and gives a client that is retrying the operation time to finish it first. Must be positive.")
+	strandedActorMinAge         = pflag.Duration("stranded-actor-min-age", 5*time.Minute, "How long an actor in SUSPENDING, REVERTING or DELETING must have gone unwritten before ateapi re-drives its operation. It is the delay before a stranded actor is finished, and gives a client that is retrying the operation time to finish it first. Must be positive.")
 	strandedActorResyncInterval = pflag.Duration("stranded-actor-resync-interval", 2*time.Minute, fmt.Sprintf("Interval between sweeps that list every actor for stranded ones. Each sweep reads every actor, so raise it on a deployment with very many. Must be at least %s.", minResyncInterval))
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")

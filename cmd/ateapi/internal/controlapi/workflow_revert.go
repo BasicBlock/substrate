@@ -57,6 +57,7 @@ func isRevertable(actor *ateapipb.Actor) bool {
 // actor was reverted from, so a re-entered workflow fast-forwards to wherever
 // the previous attempt stopped.
 func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error) {
+	ctx = preview.ContextWithOptIn(ctx)
 	return w.revertActor(ctx, actorRef, w.acquireActorLease)
 }
 

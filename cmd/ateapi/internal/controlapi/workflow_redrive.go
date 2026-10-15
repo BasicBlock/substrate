@@ -24,12 +24,13 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/preview"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 )
 
-// A workflow commits its transitional state (SUSPENDING, PAUSING, REVERTING,
+// A workflow commits its transitional state (SUSPENDING, REVERTING,
 // DELETING) before it does the work, and holds the actor's lease while it
 // runs. If the process running it goes away, or its caller cancels it, the
 // state stays and the actor refuses every other operation. RedriveActor
@@ -38,7 +39,7 @@ import (
 //
 // The four states are the ones a caller asked for and no other API leaves:
 //
-//   - SUSPENDING, PAUSING: the workflow checkpoints the workload again, or
+//   - SUSPENDING (including a pause): the workflow checkpoints the workload again, or
 //     uploads the node-local snapshot again. If the first attempt took the
 //     checkpoint but did not commit it, the workload is gone and atelet's
 //     Checkpoint cannot succeed (atelet is not yet idempotent, #372), so the
@@ -109,6 +110,7 @@ type RedriveResult struct {
 // caller should retry after a delay. A workflow that crashes the actor is no
 // error: the actor left the state, and the outcome is Crashed.
 func (w *ActorWorkflow) RedriveActor(ctx context.Context, observed *ateapipb.Actor, notUpdatedSince time.Time) (result RedriveResult, err error) {
+	ctx = preview.ContextWithOptIn(ctx)
 	actorRef := resources.ActorRefFromActor(observed)
 	result.Operation, _ = redriveOperation(observed.GetStatus().GetState())
 	defer func() { w.instruments.recordRedrive(ctx, result.Operation, result.Outcome) }()

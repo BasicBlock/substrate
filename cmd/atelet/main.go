@@ -78,6 +78,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	kubeinformers "k8s.io/client-go/informers"
@@ -859,29 +860,37 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		}
 		state = s.snapshots.CommitLocal(actorUID, snap)
 	case ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE:
-		// CheckpointWorkload has already deleted the workload, so a retried
-		// Checkpoint cannot redo this upload. It waits for the object-store plugin
-		// as long as ctx allows, and a plugin error reaches the control plane as
-		// Internal, which crashes the actor.
-		// TODO(#362): Because we do not cache the external snapshot files when upload fails, we have to mark the Actor as CRASHED.
 		if err := s.uploadExternalCheckpoint(ctx, req, checkpointDir, sandboxRec); err != nil {
-			dPersist = time.Since(tPersist)
-			return nil, fmt.Errorf("while uploading external snapshot: %w", err)
+			if req.GetAtespace() == resources.GoldenActorAtespace {
+				return nil, fmt.Errorf("while uploading golden snapshot: %w", err)
+			}
+			if keepErr := s.moveLocalCheckpoint(context.WithoutCancel(ctx), req, sandboxRec); keepErr != nil {
+				return nil, fmt.Errorf("while uploading external snapshot: %w (keeping local snapshot: %v)", err, keepErr)
+			}
+			snap.Snapshot = proto.CloneOf(req.GetSnapshot())
+			snap.Snapshot.Object = nil
+			state = s.snapshots.CommitLocal(actorUID, snap)
+			slog.WarnContext(ctx, "Kept a snapshot on the node after its upload failed", slog.Any("actor", actorRef), slog.Any("err", err))
+		} else {
+			snap.UploadTime = time.Now()
+			state = s.snapshots.CommitDurable(actorUID, snap)
 		}
-		snap.UploadTime = time.Now()
-		state = s.snapshots.CommitDurable(actorUID, snap)
 	default:
 		return nil, fmt.Errorf("unexpected upload mode: %v", mode)
 	}
 	dPersist = time.Since(tPersist)
 
+	var teardownErr error
 	if err := s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes()); err != nil {
-		return nil, fmt.Errorf("while unmounting external volumes: %w", err)
+		teardownErr = fmt.Errorf("while unmounting external volumes: %w", err)
+	} else if err := resetActorDirs(actorUID); err != nil {
+		teardownErr = fmt.Errorf("while resetting actor dirs: %w", err)
 	}
-
-	// Note: we do not crash the actor if resetting the directory fails.
-	if err := resetActorDirs(actorUID); err != nil {
-		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
+	if teardownErr != nil {
+		if req.GetUploadConfig().GetMode() != ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE {
+			return nil, teardownErr
+		}
+		slog.WarnContext(ctx, "Failed to tear down after persisting a snapshot", slog.Any("actor", actorRef), slog.Any("err", teardownErr))
 	}
 
 	return &ateletpb.CheckpointResponse{State: state}, nil
@@ -1109,7 +1118,7 @@ func (s *Atelet) uploadLocalCheckpointDir(ctx context.Context, req *ateletpb.Pro
 			return "", nil
 		}
 		if status.Code(fetchErr) == codes.NotFound {
-			return "", fmt.Errorf("local snapshot %q is gone and no uploaded copy exists: %w",
+			return "", apierror.NotFound("local snapshot %q is gone and no uploaded copy exists: %v",
 				localSnapshotName, fetchErr)
 		}
 		return "", fmt.Errorf("while probing for an already-uploaded snapshot manifest: %w", fetchErr)

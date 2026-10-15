@@ -812,7 +812,7 @@ groups:
       running, by operation and outcome.
     note: >
       A workflow that stops before it ends (ateapi restarts, crashes, or loses
-      its caller) leaves the actor in SUSPENDING, PAUSING, REVERTING or
+      its caller) leaves the actor in SUSPENDING, REVERTING or
       DELETING. A re-drive runs the workflow again. ate.actor.operation.name is
       the operation that finishes the state of the actor. A busy or settled
       attempt did nothing to the actor. The outcome failed repeats with a delay

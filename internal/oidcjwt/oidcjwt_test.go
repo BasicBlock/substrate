@@ -150,7 +150,7 @@ func TestVerifierReturnsRawClaims(t *testing.T) {
 	claims["email_verified"] = true
 	token := mintJWT(t, "RS256", "key", key, claims)
 
-	got, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(t.Context(), token, time.Now())
+	got, err := NewVerifier(ti.issuer(), []string{testAudience}, HTTPKeySource(ti.issuer(), ti.server.Client())).Verify(t.Context(), token, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

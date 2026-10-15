@@ -122,7 +122,7 @@ func TestRestoreWorkloadRejectsUnsupportedFidelity(t *testing.T) {
 	}
 	// A zero service cannot acquire locks, configure networking, or open log pipes.
 	s := &AteWorkerService{}
-	for _, fidelity := range []ateworkerpb.SnapshotFidelity{0, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, 99} {
+	for _, fidelity := range []ateworkerpb.SnapshotFidelity{0, 99} {
 		t.Run(fidelity.String(), func(t *testing.T) {
 			resp, err := s.RestoreWorkload(context.Background(), &ateworkerpb.RestoreWorkloadRequest{
 				ActorDirs: dirs,

@@ -36,6 +36,7 @@ import (
 // a re-entered workflow fast-forwards past the steps a previous attempt
 // completed, deriving progress from the persisted actor alone.
 func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error) {
+	ctx = preview.ContextWithOptIn(ctx)
 	return w.pauseActor(ctx, actorRef, w.acquireActorLease)
 }
 

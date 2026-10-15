@@ -82,7 +82,7 @@ func (r *runsc) cmdPause(ctx context.Context, containerName string) error {
 	cmd := exec.CommandContext(ctx, r.path, r.pauseArgs(containerName)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := reaper.RunCommand(cmd); err != nil {
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("while running `runsc pause`: %w", err)
 	}
 	return nil
@@ -119,7 +119,7 @@ func (r *runsc) cmdRootfsCheckpoint(ctx context.Context, imagePath string, paths
 	cmd := exec.CommandContext(ctx, r.path, r.rootfsCheckpointArgs(imagePath, paths, leaveRunning)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := reaper.RunCommand(cmd); err != nil {
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("while running `runsc fscheckpoint`: %w", err)
 	}
 	return nil

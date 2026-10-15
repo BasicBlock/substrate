@@ -29,6 +29,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -38,6 +40,7 @@ import (
 // the steps a previous attempt completed, deriving progress from the
 // persisted actor alone.
 func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error) {
+	ctx = preview.ContextWithOptIn(ctx)
 	return w.suspendActor(ctx, actorRef, w.acquireActorLease)
 }
 
@@ -91,6 +94,15 @@ func (w *ActorWorkflow) suspendActor(ctx context.Context, actorRef resources.Act
 		wireFidelity, err = w.ensurePausedSnapshotUploaded(leaseCtx, actorRef, actor, actorTemplate)
 	} else {
 		wireFidelity, err = w.ensureAteletSuspended(leaseCtx, actorRef, actor, actorTemplate)
+		if errors.Is(err, errSnapshotKeptOnNode) {
+			if err := w.ensureVolumesDetached(leaseCtx, actor, actorTemplate, "DetachVolumes", ateattr.OperationSuspend); err != nil {
+				return nil, err
+			}
+			if _, err := w.ensurePausedFinalized(leaseCtx, actorRef); err != nil {
+				return nil, err
+			}
+			return nil, apierror.Unavailable("actor %s is suspended on its node; retry suspend to upload its snapshot", actorRef)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -246,6 +258,10 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	ctx, done := stepSpan(ctx, "CallAteletSuspend")
 	defer func() { err = done(err) }()
 
+	if snapshotAtLatestGeneration(actor.GetStatus()).GetLocality() != "" {
+		return "", errSnapshotKeptOnNode
+	}
+
 	assignment := actor.GetStatus().GetWorkerAssignment()
 	if assignment == nil {
 		// Missing active worker pod reference in SUSPENDING state indicates corrupted store state.
@@ -294,10 +310,39 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	}
 	wireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 
-	if _, err = client.Checkpoint(ctx, req); err != nil {
+	resp, err := client.Checkpoint(ctx, req)
+	if err != nil {
 		return wireFidelity, handleAteletError(ctx, w.store, actorRef, ateattr.OperationSuspend, "Checkpoint", false, err)
 	}
+	if local := resp.GetState().GetLatestLocal().GetSnapshot(); local != nil {
+		if local.GetSnapshotUuid() != inProgressSnap.GetUuid() || local.GetGeneration() != inProgressSnap.GetGeneration() {
+			return wireFidelity, apierror.Internal("checkpoint returned a different local snapshot")
+		}
+		if err := w.recordSnapshotKeptOnNode(ctx, actorRef, actor); err != nil {
+			return wireFidelity, err
+		}
+		return wireFidelity, errSnapshotKeptOnNode
+	}
+
 	return wireFidelity, nil
+}
+
+var errSnapshotKeptOnNode = errors.New("snapshot kept on its node after upload failed")
+
+func (w *ActorWorkflow) recordSnapshotKeptOnNode(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) error {
+	if actor.GetStatus().GetAssignedNode() == "" {
+		return apierror.Internal("kept snapshot has no assigned node")
+	}
+	_, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(a *ateapipb.Actor) error {
+		snap := snapshotAtLatestGeneration(a.GetStatus())
+		if snap == nil {
+			return apierror.Internal("kept snapshot has no generation")
+		}
+		snap.Locality = a.GetStatus().GetAssignedNode()
+		snap.DurableSnapshot = nil
+		return nil
+	})
+	return err
 }
 
 // ensurePausedSnapshotUploaded suspends a paused actor by telling the atelet
@@ -350,6 +395,17 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 	wireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 
 	if _, err = client.PromoteSnapshot(ctx, req); err != nil {
+		if ateletErrorCrashesActor(ctx, false, err) && status.Code(err) != codes.NotFound {
+			_, updateErr := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(a *ateapipb.Actor) error {
+				a.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
+				snapshotAtLatestGeneration(a.Status).DurableSnapshot = nil
+				return nil
+			})
+			if updateErr != nil {
+				return wireFidelity, updateErr
+			}
+			return wireFidelity, apierror.Unavailable("upload failed; actor %s retains its local snapshot: %v", actorRef, err)
+		}
 		return wireFidelity, handleAteletError(ctx, w.store, actorRef, ateattr.OperationSuspend, "PromoteSnapshot", false, err)
 	}
 	return wireFidelity, nil

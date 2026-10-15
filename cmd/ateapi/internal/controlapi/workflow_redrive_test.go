@@ -39,7 +39,7 @@ import (
 // redriveAtelet is an atelet whose calls succeed unless a test makes one fail,
 // and which counts the calls it gets.
 type redriveAtelet struct {
-	ateletpb.UnimplementedAteomHerderServer
+	ateletpb.UnimplementedAteletServer
 
 	mu             sync.Mutex
 	errs           map[string]error
@@ -93,14 +93,20 @@ func (f *redriveAtelet) Checkpoint(_ context.Context, req *ateletpb.CheckpointRe
 	if err := f.serve("Checkpoint"); err != nil {
 		return nil, err
 	}
-	return &ateletpb.CheckpointResponse{SnapshotKeptOnNode: keptOnNode}, nil
+	resp := &ateletpb.CheckpointResponse{}
+	if keptOnNode {
+		local := proto.CloneOf(req.GetSnapshot())
+		local.Object = nil
+		resp.State = &ateletpb.ActorSnapshotState{LatestLocal: &ateletpb.SnapshotReport{Snapshot: local}}
+	}
+	return resp, nil
 }
 
-func (f *redriveAtelet) UploadPausedCheckpoint(context.Context, *ateletpb.UploadPausedCheckpointRequest) (*ateletpb.UploadPausedCheckpointResponse, error) {
-	if err := f.serve("UploadPausedCheckpoint"); err != nil {
+func (f *redriveAtelet) PromoteSnapshot(context.Context, *ateletpb.PromoteSnapshotRequest) (*ateletpb.PromoteSnapshotResponse, error) {
+	if err := f.serve("PromoteSnapshot"); err != nil {
 		return nil, err
 	}
-	return &ateletpb.UploadPausedCheckpointResponse{}, nil
+	return &ateletpb.PromoteSnapshotResponse{}, nil
 }
 
 func (f *redriveAtelet) Terminate(context.Context, *ateletpb.TerminateRequest) (*ateletpb.TerminateResponse, error) {
@@ -134,7 +140,7 @@ func newRedriveFixture(t *testing.T) *redriveFixture {
 	if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
 		Metadata:       &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
 		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
-		SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor"},
+		SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "gvisor"},
 	}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
@@ -254,7 +260,7 @@ func TestRedriveActor_FinishesAStrandedSuspend(t *testing.T) {
 	}
 	// The re-entered workflow checkpoints to the location the first attempt
 	// minted, and commits that snapshot.
-	if got := f.atelet.lastCheckpoint.GetExternalConfig().GetSnapshotUri(); got != inProgress {
+	if got := f.atelet.lastCheckpoint.GetSnapshot().GetObject().GetSnapshotUri(); got != inProgress {
 		t.Errorf("re-driven Checkpoint wrote to %q, want the recorded location %q", got, inProgress)
 	}
 	committed := findLatestDurableSnapshot(got.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
@@ -441,7 +447,7 @@ func TestRedriveActor_PausesAnActorWhoseSnapshotAteletKeptOnTheNode(t *testing.T
 
 	node := wireTestAssignment().GetNodeName()
 	got := f.get(ref)
-	if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
+	if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Fatalf("state = %v, want PAUSED on the node holding the snapshot", got.GetStatus().GetState())
 	}
 	if got.GetStatus().GetWorkerAssignment() != nil {
@@ -469,9 +475,11 @@ func TestRedriveActor_DoesNotCheckpointAgainAfterTheKeptSnapshotWasRecorded(t *t
 	f := newRedriveFixture(t)
 	ref := f.seedRunning("id1")
 	stranded := f.strandSuspend(ref)
-	if err := f.w.recordSnapshotKeptOnNode(f.ctx, ref, stranded); err != nil {
-		t.Fatalf("recordSnapshotKeptOnNode: %v", err)
-	}
+	mustUpdateActorStatus(t, f.ctx, f.store, stranded, func(st *ateapipb.ActorStatus) {
+		snap := snapshotAtLatestGeneration(st)
+		snap.Locality = st.GetAssignedNode()
+		snap.DurableSnapshot = nil
+	})
 	checkpoints := f.atelet.count("Checkpoint")
 
 	result, err := f.redrive(f.get(ref), allQuiet())
@@ -479,7 +487,7 @@ func TestRedriveActor_DoesNotCheckpointAgainAfterTheKeptSnapshotWasRecorded(t *t
 		t.Fatalf("RedriveActor = %+v, %v, want the Unavailable a suspend ends with when its actor is paused on the node", result, err)
 	}
 
-	if got := f.get(ref).GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_PAUSED {
+	if got := f.get(ref).GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want PAUSED", got)
 	}
 	if got := f.atelet.count("Checkpoint"); got != checkpoints {
@@ -500,7 +508,7 @@ func TestRedriveActor_ReturnsAPausedActorToPausedWhenItsUploadFails(t *testing.T
 		wantOut   string
 		wantErr   bool
 	}{
-		{"hard failure", status.Error(codes.Internal, "gcs: bad request"), ateapipb.ActorState_ACTOR_STATE_PAUSED, ateattr.RedriveOutcomeFailed, true},
+		{"hard failure", status.Error(codes.Internal, "gcs: bad request"), ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateattr.RedriveOutcomeFailed, true},
 		{"snapshot gone", status.Error(codes.NotFound, "local snapshot is gone and no uploaded copy exists"), ateapipb.ActorState_ACTOR_STATE_CRASHED, ateattr.RedriveOutcomeCrashed, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -509,11 +517,11 @@ func TestRedriveActor_ReturnsAPausedActorToPausedWhenItsUploadFails(t *testing.T
 			if _, err := f.w.PauseActor(f.ctx, ref); err != nil {
 				t.Fatalf("PauseActor: %v", err)
 			}
-			stranded := f.strand(ref, "UploadPausedCheckpoint", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, func() error {
+			stranded := f.strand(ref, "PromoteSnapshot", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, func() error {
 				_, err := f.w.SuspendActor(f.ctx, ref)
 				return err
 			})
-			f.atelet.fail("UploadPausedCheckpoint", tc.err)
+			f.atelet.fail("PromoteSnapshot", tc.err)
 
 			result, err := f.redrive(stranded, allQuiet())
 			if result.Operation != ateattr.OperationSuspend || result.Outcome != tc.wantOut || (err != nil) != tc.wantErr {
@@ -596,11 +604,11 @@ func TestRedriveActor_FinishesEachOperation(t *testing.T) {
 	}{
 		{
 			name:      "pause",
-			wantOp:    ateattr.OperationPause,
+			wantOp:    ateattr.OperationSuspend,
 			wantRPC:   "Checkpoint",
-			wantState: ateapipb.ActorState_ACTOR_STATE_PAUSED,
+			wantState: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 			strand: func(f *redriveFixture, ref resources.ActorRef) *ateapipb.Actor {
-				return f.strand(ref, "Checkpoint", ateapipb.ActorState_ACTOR_STATE_PAUSING, func() error {
+				return f.strand(ref, "Checkpoint", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, func() error {
 					_, err := f.w.PauseActor(f.ctx, ref)
 					return err
 				})
@@ -611,13 +619,13 @@ func TestRedriveActor_FinishesEachOperation(t *testing.T) {
 			// instead of checkpointing a workload.
 			name:      "suspend of a paused actor",
 			wantOp:    ateattr.OperationSuspend,
-			wantRPC:   "UploadPausedCheckpoint",
+			wantRPC:   "PromoteSnapshot",
 			wantState: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 			strand: func(f *redriveFixture, ref resources.ActorRef) *ateapipb.Actor {
 				if _, err := f.w.PauseActor(f.ctx, ref); err != nil {
 					f.t.Fatalf("PauseActor: %v", err)
 				}
-				return f.strand(ref, "UploadPausedCheckpoint", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, func() error {
+				return f.strand(ref, "PromoteSnapshot", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, func() error {
 					_, err := f.w.SuspendActor(f.ctx, ref)
 					return err
 				})
@@ -685,7 +693,6 @@ func TestRedriveActor_FinishesEachOperation(t *testing.T) {
 func TestRedriveActor_OnlyFinishesOperationsWithOneWayOut(t *testing.T) {
 	redriven := map[ateapipb.ActorState]string{
 		ateapipb.ActorState_ACTOR_STATE_SUSPENDING: ateattr.OperationSuspend,
-		ateapipb.ActorState_ACTOR_STATE_PAUSING:    ateattr.OperationPause,
 		ateapipb.ActorState_ACTOR_STATE_REVERTING:  ateattr.OperationRevert,
 		ateapipb.ActorState_ACTOR_STATE_DELETING:   ateattr.OperationDelete,
 	}
@@ -704,7 +711,7 @@ func TestRedriveActor_OnlyFinishesOperationsWithOneWayOut(t *testing.T) {
 			mustUpdateActorStatus(t, f.ctx, f.store, f.get(ref), func(status *ateapipb.ActorStatus) { status.State = state })
 			result, err := f.redrive(f.get(ref), allQuiet())
 			assertRedrive(t, result, err, "", ateattr.RedriveOutcomeSettled)
-			for _, rpc := range []string{"Checkpoint", "UploadPausedCheckpoint", "Terminate"} {
+			for _, rpc := range []string{"Checkpoint", "PromoteSnapshot", "Terminate"} {
 				if got := f.atelet.count(rpc); got != 0 {
 					t.Errorf("atelet %s calls = %d, want none for a %v actor", rpc, got, state)
 				}

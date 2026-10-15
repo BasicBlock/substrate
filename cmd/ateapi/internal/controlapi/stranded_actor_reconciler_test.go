@@ -200,7 +200,7 @@ func TestStrandedActorReconciler_ResyncQueuesOnlyQuietTransitionalActors(t *test
 
 	for _, actor := range []*ateapipb.Actor{
 		updatedActor("suspending", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, quiet),
-		updatedActor("pausing", ateapipb.ActorState_ACTOR_STATE_PAUSING, quiet),
+		updatedActor("pausing", ateapipb.ActorState_ACTOR_STATE_SUSPENDING, quiet),
 		updatedActor("reverting", ateapipb.ActorState_ACTOR_STATE_REVERTING, quiet),
 		updatedActor("deleting", ateapipb.ActorState_ACTOR_STATE_DELETING, quiet),
 		// Written inside the minimum age: a workflow may be advancing it.
@@ -209,7 +209,7 @@ func TestStrandedActorReconciler_ResyncQueuesOnlyQuietTransitionalActors(t *test
 		updatedActor("resuming", ateapipb.ActorState_ACTOR_STATE_RESUMING, quiet),
 		updatedActor("running", ateapipb.ActorState_ACTOR_STATE_RUNNING, quiet),
 		updatedActor("suspended", ateapipb.ActorState_ACTOR_STATE_SUSPENDED, quiet),
-		updatedActor("paused", ateapipb.ActorState_ACTOR_STATE_PAUSED, quiet),
+		updatedActor("paused", ateapipb.ActorState_ACTOR_STATE_SUSPENDED, quiet),
 		updatedActor("crashed", ateapipb.ActorState_ACTOR_STATE_CRASHED, quiet),
 	} {
 		st.put(actor)

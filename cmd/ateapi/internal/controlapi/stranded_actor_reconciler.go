@@ -67,7 +67,7 @@ type actorRedriver interface {
 }
 
 // StrandedActorReconciler finishes the operations of actors that a workflow
-// started and no workflow is running: an actor in SUSPENDING, PAUSING,
+// started and no workflow is running: an actor in SUSPENDING,
 // REVERTING or DELETING whose record has not been written for minAge. See
 // RedriveActor for why these four states and not RESUMING.
 //

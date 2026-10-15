@@ -1209,14 +1209,14 @@ func TestFailedCheckpointForgetsLocalSnapshot(t *testing.T) {
 	a.restoreLocal(t, "pause-snap-1", 1)
 
 	a.store.putErr = errors.New("object store unavailable")
-	if _, err := a.checkpoint(t, a.snapshot("suspend-snap-2", 2), ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE); err == nil {
-		t.Fatal("Checkpoint (suspend) succeeded, want the upload to fail")
+	if _, err := a.checkpoint(t, a.snapshot("suspend-snap-2", 2), ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE); err != nil {
+		t.Fatalf("Checkpoint: %v; want its retained local checkpoint", err)
 	}
 	if _, err := os.Stat(ateletpath.LocalSnapshotDir(pluginActorUID, "pause-snap-1")); !os.IsNotExist(err) {
 		t.Fatalf("pause snapshot after the failed suspend: stat = %v, want it deleted", err)
 	}
-	if st := a.s.snapshots.State(pluginActorUID); st.GetLatestLocal() != nil || st.GetLatestDurable() != nil {
-		t.Errorf("state = %v, want neither a local nor a durable snapshot", st)
+	if st := a.s.snapshots.State(pluginActorUID); st.GetLatestLocal().GetSnapshot().GetSnapshotUuid() != "suspend-snap-2" || st.GetLatestDurable() != nil {
+		t.Errorf("state = %v, want the new local snapshot and no durable snapshot", st)
 	}
 }
 
@@ -1266,10 +1266,10 @@ func TestTerminateWithoutSandboxRecord(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
-	s := &Atelet{
-		workerDialer:      newWorkerDialer(1),
-		systemInfoVolumes: newSystemInfoVolumeRefresher(nil, nil),
-	}
+	s := newPluginHerder(t, &recordingObjectStorage{})
+	s.workerDialer = newWorkerDialer(1)
+	s.systemInfoVolumes = newSystemInfoVolumeRefresher(nil, nil)
+
 	req := &ateletpb.TerminateRequest{
 		Atespace:              "ate-demo",
 		ActorName:             "never-started",
@@ -1277,7 +1277,7 @@ func TestTerminateWithoutSandboxRecord(t *testing.T) {
 		ActorTemplateAtespace: "default",
 		ActorTemplateName:     "counter",
 		WorkerPodUid:          "5f1c0d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
-		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "app", Image: "example.invalid/app:v1"}}},
+		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "app", Image: "example.invalid/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"}}},
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
 		if _, err := s.Terminate(ctx, req); err != nil {

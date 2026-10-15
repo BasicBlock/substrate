@@ -210,7 +210,7 @@ func TestAwaitDrainSuspend(t *testing.T) {
 
 	t.Run("idle worker", func(t *testing.T) {
 		*drainSuspendWait = time.Second
-		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s := &AteWorkerService{inFlight: actorlock.NewInFlight()}
 		if !s.awaitDrainSuspend(context.Background(), time.Now().Add(time.Minute)) {
 			t.Error("awaitDrainSuspend with nothing in flight = false, want true")
 		}
@@ -218,7 +218,7 @@ func TestAwaitDrainSuspend(t *testing.T) {
 
 	t.Run("suspended while waiting", func(t *testing.T) {
 		*drainSuspendWait = 10 * time.Second
-		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s := &AteWorkerService{inFlight: actorlock.NewInFlight()}
 		release := s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
 		go func() {
 			time.Sleep(20 * time.Millisecond)
@@ -231,7 +231,7 @@ func TestAwaitDrainSuspend(t *testing.T) {
 
 	t.Run("never suspended, bounded by drain-suspend-wait", func(t *testing.T) {
 		*drainSuspendWait = 50 * time.Millisecond
-		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s := &AteWorkerService{inFlight: actorlock.NewInFlight()}
 		s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
 		start := time.Now()
 		if s.awaitDrainSuspend(context.Background(), start.Add(time.Minute)) {
@@ -244,7 +244,7 @@ func TestAwaitDrainSuspend(t *testing.T) {
 
 	t.Run("capped by a shorter overall deadline", func(t *testing.T) {
 		*drainSuspendWait = time.Minute
-		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s := &AteWorkerService{inFlight: actorlock.NewInFlight()}
 		s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
 		start := time.Now()
 		if s.awaitDrainSuspend(context.Background(), start.Add(30*time.Millisecond)) {
@@ -257,7 +257,7 @@ func TestAwaitDrainSuspend(t *testing.T) {
 
 	t.Run("cancelled", func(t *testing.T) {
 		*drainSuspendWait = 10 * time.Second
-		s := &AteomService{inFlight: actorlock.NewInFlight()}
+		s := &AteWorkerService{inFlight: actorlock.NewInFlight()}
 		s.inFlight.Add("actor-1", "CheckpointWorkload", nil)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
