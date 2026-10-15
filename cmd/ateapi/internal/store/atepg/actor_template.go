@@ -33,7 +33,7 @@ func (p *Persistence) CreateActorTemplate(ctx context.Context, template *ateapip
 		dbTemplate.Metadata = &ateapipb.ResourceMetadata{}
 	}
 	setCreateMetadata(dbTemplate.Metadata)
-	protoBytes, err := proto.Marshal(dbTemplate)
+	protoBytes, err := marshalStoredTemplate(dbTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling actor template: %w", err)
 	}
@@ -116,7 +116,7 @@ func (p *Persistence) UpdateActorTemplate(ctx context.Context, templateRef resou
 		dbTemplate.Metadata = &ateapipb.ResourceMetadata{}
 	}
 	setUpdateMetadata(dbTemplate.Metadata, templateBeforeMutation.GetMetadata())
-	updatedBytes, err := proto.Marshal(dbTemplate)
+	updatedBytes, err := marshalStoredTemplate(dbTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling actor template: %w", err)
 	}

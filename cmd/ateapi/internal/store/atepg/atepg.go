@@ -387,6 +387,16 @@ func unmarshalStored(b []byte, m proto.Message) error {
 	if err := (proto.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(b, m); err != nil {
 		return err
 	}
+	if template, ok := m.(*ateapipb.ActorTemplate); ok && template.GetSandboxConfig().GetSandboxClass() == "" {
+		class, err := legacySandboxClass(b)
+		if err != nil {
+			return err
+		}
+		if class != "" {
+			template.SandboxConfig.SandboxClass = class
+		}
+	}
+
 	defaults.Apply(m)
 	return nil
 }
