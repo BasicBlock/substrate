@@ -1777,7 +1777,10 @@ message ResumeActorRequest {
   ObjectRef actor = 1;
 }
 
+// CheckActorAccessRequest checks an ingress client's access to an actor.
 message CheckActorAccessRequest {
+  // The actor whose ports the client wants to reach.
+  //
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
@@ -1788,6 +1791,7 @@ message CheckActorAccessRequest {
   string token = 2 [ debug_redact = true ];
 }
 
+// CheckActorAccessResponse reports whether the client may reach the actor.
 message CheckActorAccessResponse {
   // True when the token authenticates and its principal may connect.
   bool allowed = 1;

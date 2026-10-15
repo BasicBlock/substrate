@@ -5098,8 +5098,11 @@ func (x *ResumeActorRequest) GetActor() *ObjectRef {
 	return nil
 }
 
+// CheckActorAccessRequest checks an ingress client's access to an actor.
 type CheckActorAccessRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// The actor whose ports the client wants to reach.
+	//
 	// +k8s:required
 	// +k8s:subfield(atespace)=+k8s:required
 	Actor *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
@@ -5155,6 +5158,7 @@ func (x *CheckActorAccessRequest) GetToken() string {
 	return ""
 }
 
+// CheckActorAccessResponse reports whether the client may reach the actor.
 type CheckActorAccessResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// True when the token authenticates and its principal may connect.
