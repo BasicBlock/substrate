@@ -417,6 +417,26 @@ func TestSyncer_SoftDelete_SuspendsBoundActors(t *testing.T) {
 	}
 }
 
+func TestSyncer_ForceDelete_DoesNotSuspendBoundActors(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-force", "pool1", "worker-force", "10.0.0.7"
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "one"})
+	s, pods, _ := setupReconcileTest(t, api)
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	pod.DeletionGracePeriodSeconds = new(int64)
+	mustReconcile(t, ctx, s, seedPod(t, pods, pod))
+	waitForSuspendPass(t, s, testPodUID)
+	if got := api.suspended(); len(got) != 0 {
+		t.Errorf("suspended = %v: a force-deleted pod has no checkpoint grace period", got)
+	}
+	if got := api.get(testPodUID).GetStatus().GetState(); got != ateapipb.WorkerState_WORKER_STATE_DRAINING {
+		t.Errorf("worker state = %v, want DRAINING while deletion finishes", got)
+	}
+}
+
 // TestSyncer_SoftDelete_RetriesTransientSuspendFailureWithinPass verifies that
 // a transient SuspendActor failure (the shape an ate-api Unavailable, or an
 // atelet being replaced mid-release, takes) is retried with backoff inside the

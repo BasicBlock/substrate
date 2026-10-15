@@ -316,6 +316,11 @@ func (s *WorkerPoolSyncer) reconcile(ctx context.Context, key workerKey) error {
 		if err := s.markWorkerDraining(ctx, key); err != nil {
 			return err
 		}
+		// Force deletion gives the worker no time to checkpoint. Starting a
+		// suspend here races pod removal and can misclassify abrupt worker loss.
+		if pod.DeletionGracePeriodSeconds != nil && *pod.DeletionGracePeriodSeconds == 0 {
+			return nil
+		}
 		s.suspendDrainingActors(ctx, key)
 		return nil
 	}
