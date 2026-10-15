@@ -80,6 +80,7 @@ var (
 	readinessListenAddress = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for the HTTP /readyz and /healthz probes")
 	maxActors              = pflag.Int("max-actors", 1000, "How many actors this worker will host at once")
 	usageSampleInterval    = pflag.Duration("usage-sample-interval", time.Minute, "How often the ateworker samples the resource usage of its actors. Each sample writes an ate.actor.usage_sampled record per actor, and GetActiveWorkloadStats serves the latest.")
+	drainSuspendWait       = pflag.Duration("drain-suspend-wait", 5*time.Minute, "On SIGTERM, how long to wait for the control plane to suspend the draining actor(s) (a CheckpointWorkload, which ends the session) before stopping them with SIGTERM instead. Bounded by workloadGracePeriod (30 minutes) regardless of this value, and comfortably inside the worker pod's own terminationGracePeriodSeconds (60 minutes, set by atecontroller). 0 stops them without waiting.")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
@@ -409,6 +410,18 @@ func (s *AteWorkerService) gracefulShutdown(ctx context.Context) {
 	// workloadGracePeriod however the time falls between them.
 	deadline := time.Now().Add(workloadGracePeriod)
 
+	// atecontroller suspends the actor(s) of a Terminating worker pod: the
+	// CheckpointWorkload that does it ends the session, and each actor later
+	// resumes on another worker from that snapshot instead of being stopped
+	// with this pod. Give any in-flight RPCs (chiefly such a checkpoint) a
+	// bounded head start, separate from the rest of the grace period, so a
+	// checkpoint that cannot finish in time does not consume a short SIGTERM
+	// grace period down to nothing.
+	if !s.awaitDrainSuspend(ctx, deadline) {
+		slog.WarnContext(ctx, "Actor was not suspended while draining; stopping it",
+			slog.Duration("waited", *drainSuspendWait), slog.Any("rpcs", s.inFlight.Names()))
+	}
+
 	// Let checkpoints finish saving state before stopping containers.
 	waitCtx, waitCancel := context.WithDeadline(ctx, deadline)
 	defer waitCancel()
@@ -450,10 +463,26 @@ func (s *AteWorkerService) gracefulShutdown(ctx context.Context) {
 	slog.InfoContext(ctx, "Shutting down")
 }
 
-// containerKillTimeout bounds the post-SIGKILL wait, so a completely broken
-// gVisor cannot hold shutdown open indefinitely. It is deliberately not drawn
-// from the grace period: by this point the container has already had its
-// allowance and the deadline has passed. A var so tests can shorten it.
+// awaitDrainSuspend waits for every in-flight RPC to end — chiefly a
+// CheckpointWorkload that atecontroller's drain-suspend triggers — and
+// reports whether the worker went idle. The wait is bounded by
+// --drain-suspend-wait, further capped by deadline so it never outlives the
+// rest of the drain.
+func (s *AteWorkerService) awaitDrainSuspend(ctx context.Context, deadline time.Time) bool {
+	until := time.Now().Add(*drainSuspendWait)
+	if until.After(deadline) {
+		until = deadline
+	}
+	waitCtx, cancel := context.WithDeadline(ctx, until)
+	defer cancel()
+	return s.inFlight.WaitIdle(waitCtx)
+}
+
+// containerKillTimeout bounds the wait after SIGKILL, so a completely broken
+// gVisor cannot hold shutdown or a teardown open indefinitely. It is
+// deliberately not drawn from the grace period: by this point the container has
+// already had its allowance and the deadline has passed. A var so tests can
+// shorten it.
 var containerKillTimeout = 5 * time.Second
 
 // containerRuntime is the slice of *runsc that stopping and tearing down
@@ -563,11 +592,13 @@ func validateActorDirs(actorDirs *ateworkerpb.ActorDirs) error {
 	return nil
 }
 
-// supportedFidelities are the snapshot fidelities this runtime serves. gVisor
-// keeps rootfs changes inside its memory checkpoint, so it cannot capture
-// ROOTFS without MEMORY.
+// supportedFidelities are the snapshot fidelities this runtime serves. ROOTFS
+// is restore-only: the root filesystem image a MEMORY capture takes beside its
+// memory image (runsc fscheckpoint), cold-booted when the memory image cannot
+// be restored. CheckpointWorkload captures only VOLUMES and MEMORY.
 var supportedFidelities = []ateworkerpb.SnapshotFidelity{
 	ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+	ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
 	ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 }
 
@@ -672,6 +703,7 @@ func (s *AteWorkerService) RunWorkload(ctx context.Context, req *ateworkerpb.Run
 	if err := rcmd.cmdCreate(ctx, pw, ocispec.PauseContainer, nil); err != nil {
 		return nil, fmt.Errorf("while creating pause container: %w", err)
 	}
+	liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 	if err := rcmd.cmdStart(ctx, pw, ocispec.PauseContainer); err != nil {
 		return nil, fmt.Errorf("while starting pause container: %w", err)
 	}
@@ -781,6 +813,9 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 
 	containers := req.GetSpec().GetContainers()
 	durablePaths := durableFSCheckpointPaths(containers)
+	// rootfsFiles are the root filesystem image a MEMORY capture takes beside
+	// the memory image: the ROOTFS subset a failed memory restore falls back to.
+	var rootfsFiles []string
 	switch fidelity {
 	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
 		if len(durablePaths) == 0 {
@@ -792,6 +827,30 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 			return nil, fmt.Errorf("while checkpointing durable-dir volumes: %w", err)
 		}
 	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		// Capture the root filesystem beside the memory image, at the same
+		// paused instant, so a restore that cannot use the memory image can
+		// cold-boot from the files instead: pause, fscheckpoint with
+		// -leave-running so the sandbox survives for the checkpoint, then the
+		// memory checkpoint, which ends the session whether or not the root
+		// filesystem capture worked. The capture is best-effort: fscheckpoint
+		// is experimental in gVisor, and its failure must not turn a working
+		// memory checkpoint into a failed suspend. A snapshot without it
+		// simply has no root filesystem fallback. Nor does one with durable-dir
+		// volumes: their fs/ image and the root filesystem's would both need
+		// runsc's one --fs-restore-image-path.
+		if len(durablePaths) == 0 {
+			err := rcmd.cmdPause(ctx, ocispec.PauseContainer)
+			timing.pause = lap(&tLast)
+			if err != nil {
+				return nil, fmt.Errorf("while pausing pause container: %w", err)
+			}
+			rootfsFiles, err = captureRootfs(ctx, rcmd, checkpointPath, containers, true /* leaveRunning */)
+			timing.fsCheckpoint = lap(&tLast)
+			if err != nil {
+				slog.WarnContext(ctx, "Failed to capture the root filesystem beside the memory checkpoint; continuing without it",
+					slog.String("actor", attribution.Ref.String()), slog.Any("err", err))
+			}
+		}
 		// Checkpoint pause container (root of the sandbox), splitting durable-dir
 		// volumes into <checkpointPath>/fs when present.
 		sandbox, sbErr := openSandboxProcess(req.GetActorDirs())
@@ -819,7 +878,7 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	// Cleanup the containers after checkpointing. This also unhosts the actor,
 	// before the snapshot listing below can fail.
 	// This is best-effort cleanup for actor containers that may have been left behind after checkpointing.
-	if err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers()); err != nil {
+	if err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers(), sandboxAfterCheckpoint(fidelity)); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
 			slog.String("actor", attribution.Ref.String()),
 			slog.String("actorUID", attribution.UID),
@@ -839,7 +898,7 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 
-	return &ateworkerpb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles}, nil
+	return &ateworkerpb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles, RootfsSnapshotFiles: rootfsFiles}, nil
 }
 
 // listSnapshotFiles returns the (relative) names of regular files directly under
@@ -868,15 +927,61 @@ func listSnapshotFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
+// sandboxState is what the caller of terminateWorkload knows about the sandbox.
+type sandboxState int
+
+const (
+	// sandboxLive means the sandbox may still be running, so its containers are
+	// stopped before they are deleted.
+	sandboxLive sandboxState = iota
+	// sandboxEnded means the sandbox has already been stopped, and its
+	// containers with it. There is nothing left to signal, and `runsc wait` has
+	// no sandbox to answer it.
+	sandboxEnded
+)
+
+// sandboxAfterCheckpoint is the state a successful checkpoint of the given
+// fidelity leaves the sandbox in. A MEMORY checkpoint is `runsc checkpoint`
+// without --leave-running, which kills the sandbox once its state is saved
+// (the root filesystem capture taken beside it runs with -leave-running, so
+// it is the memory checkpoint that ends the session). A VOLUMES checkpoint,
+// `runsc fscheckpoint` of the durable dirs, is treated as live: its containers
+// are stopped first, each wait bounded by containerKillTimeout.
+func sandboxAfterCheckpoint(fidelity ateworkerpb.SnapshotFidelity) sandboxState {
+	if fidelity == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		return sandboxEnded
+	}
+	return sandboxLive
+}
+
 // stopContainers stops the actor's application containers. The pause container
 // is left running: it is the sandbox, and cleanupContainers deletes the others
 // through it before deleting it last. Killing it first leaves the sentry a
 // zombie until reaped, which runsc delete mistakes for a live sandbox.
+//
+// Each wait is bounded by containerKillTimeout: a container that does not
+// stop promptly after SIGKILL is in a sandbox that will not answer, and
+// cleanupContainers, which runs on the same deadline, must still get to delete
+// it.
 func stopContainers(ctx context.Context, rcmd containerRuntime, containers []*ateworkerpb.Container) {
 	for _, ctr := range containers {
 		_ = rcmd.cmdKill(ctx, ctr.GetName(), "SIGKILL")
-		_ = rcmd.cmdWait(ctx, ctr.GetName())
+		waitCtx, cancel := context.WithTimeout(ctx, containerKillTimeout)
+		if err := rcmd.cmdWait(waitCtx, ctr.GetName()); err != nil && waitCtx.Err() != nil {
+			slog.WarnContext(ctx, "Container did not stop after SIGKILL; deleting it anyway",
+				slog.String("container", ctr.GetName()), slog.Duration("waited", containerKillTimeout))
+		}
+		cancel()
 	}
+}
+
+// teardownContainers removes the actor's containers from runsc. It stops the
+// application containers first unless the sandbox has already ended.
+func teardownContainers(ctx context.Context, rcmd containerRuntime, containers []*ateworkerpb.Container, sandbox sandboxState) error {
+	if sandbox == sandboxLive {
+		stopContainers(ctx, rcmd, containers)
+	}
+	return cleanupContainers(ctx, rcmd, containers)
 }
 
 func cleanupContainers(ctx context.Context, rcmd containerRuntime, containers []*ateworkerpb.Container) error {
@@ -1042,6 +1147,17 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		return nil, fmt.Errorf("while starting pause log pipe: %w", err)
 	}
 	defer pw.Close()
+	var fsRestorePath string
+	if fidelity == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+		if restoreArgs != nil {
+			return nil, fmt.Errorf("a ROOTFS restore cannot also restore durable-dir volumes")
+		}
+		fsRestorePath, err = stageRootfsRestore(checkpointDir)
+		if err != nil {
+			return nil, fmt.Errorf("while staging the root filesystem checkpoint to restore: %w", err)
+		}
+	}
+
 	switch fidelity {
 	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
 		// Create and start pause container (cold boot with durable-dir volumes restored from fs/)
@@ -1051,7 +1167,25 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		if err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 		err = rcmd.cmdStart(ctx, pw, ocispec.PauseContainer)
+		timing.pauseRestore = lap(&tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while starting pause container: %w", err)
+		}
+	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
+		// Create the pause container with the captured root filesystem and start
+		// it: a cold boot, not a runsc restore. runsc takes the image only for
+		// the sandbox's root container; it restores each application container's
+		// paths, by container name, as that container is created.
+		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
+		err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, []string{"--fs-restore-image-path", fsRestorePath})
+		timing.pauseCreate = lap(&tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while creating pause container: %w", err)
+		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
+		err = rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer)
 		timing.pauseRestore = lap(&tLast)
 		if err != nil {
 			return nil, fmt.Errorf("while starting pause container: %w", err)
@@ -1064,6 +1198,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		if err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
+		liftSandboxMemoryMax(ctx, s.cgroupRoot, rcmd.actorUID, rcmd.size)
 		err = rcmd.cmdRestore(ctx, pw, ocispec.PauseContainer, checkpointDir)
 		timing.pauseRestore = lap(&tLast)
 		if err != nil {
@@ -1093,7 +1228,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
 		}
 		switch fidelity {
-		case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
+		case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
 			err = rcmd.cmdStart(ctx, pw, ac.GetName())
 			timing.appRestore += lap(&tLast)
 			if err != nil {
@@ -1145,7 +1280,7 @@ func (s *AteWorkerService) TerminateWorkload(ctx context.Context, req *ateworker
 	if hosted != nil {
 		s.readFinal(ctx, hosted)
 	}
-	err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers())
+	err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers(), sandboxLive)
 	s.recordFinalIfEnded(ctx, hosted)
 	if err != nil {
 		return nil, fmt.Errorf("failed to terminate workload: %w", err)
@@ -1156,7 +1291,7 @@ func (s *AteWorkerService) TerminateWorkload(ctx context.Context, req *ateworker
 	return &ateworkerpb.TerminateWorkloadResponse{}, nil
 }
 
-func (s *AteWorkerService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, actorDirs *ateworkerpb.ActorDirs, containers []*ateworkerpb.Container) error {
+func (s *AteWorkerService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, actorDirs *ateworkerpb.ActorDirs, containers []*ateworkerpb.Container, sandbox sandboxState) error {
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, resources.ActorAttribution{Ref: actorRef, UID: actorUID}); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
@@ -1173,14 +1308,20 @@ func (s *AteWorkerService) terminateWorkload(ctx context.Context, actorRef resou
 	// container without its record and the actor unrecoverable.
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	// Stop the containers before deleting them, to avoid leaving a live container
-	// with no bundle on disk. Best-effort: if they are already stopped, the
-	// delete succeeds anyway.
-	stopContainers(cleanupCtx, rcmd, containers)
-	// Keep this as best-effort cleanup: atelet resets the bundle and checkpoint
-	// directories after uploading the snapshot.
-	if err := cleanupContainers(cleanupCtx, rcmd, containers); err != nil {
-		errs = append(errs, fmt.Errorf("while cleaning up runsc containers: %w", err))
+	// A live sandbox's containers are stopped before they are deleted, to avoid
+	// leaving a live container with no bundle on disk. Best-effort: if they are
+	// already stopped, the delete succeeds anyway. Keep the deletion best-effort
+	// too: atelet resets the bundle and checkpoint directories after uploading
+	// the snapshot.
+	if err := teardownContainers(cleanupCtx, rcmd, containers, sandbox); err != nil {
+		// runsc itself may be what is stuck (a hung sandbox, or a runsc command
+		// holding the container's lock), and would fail every retry the same
+		// way. Force the sandbox down without it instead.
+		slog.WarnContext(ctx, "runsc could not tear the sandbox down; forcing it",
+			slog.String("actorUID", actorUID), slog.Any("err", err))
+		if forceErr := newSandboxForcer(s.cgroupRoot).forceStop(context.WithoutCancel(ctx), actorUID, actorDirs, containerNames(containers)); forceErr != nil {
+			errs = append(errs, fmt.Errorf("while cleaning up runsc containers: %w (forcing the sandbox down: %v)", err, forceErr))
+		}
 	}
 
 	// The actor may resume on another worker, so this one may never see another

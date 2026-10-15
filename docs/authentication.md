@@ -23,12 +23,40 @@ Provider names and issuers must be unique. `issuer` must be an HTTPS URL and
 matches. `certificateAuthorityFile` and `discoveryTokenFile` are optional and
 are needed for OIDC discovery against some private Kubernetes API servers.
 
+A provider names each principal by its token's `sub`, or by the string claim
+`principalClaim` names. Google identity tokens carry an opaque number as their
+subject, so a provider for them can name principals by `email`; such a provider
+admits only tokens whose `email_verified` is true:
+
+```yaml
+- name: google
+  issuer: https://accounts.google.com
+  audiences:
+  - 32555940559.apps.googleusercontent.com  # gcloud auth print-identity-token
+  principalClaim: email
+```
+
+Principals are bare IDs, as for every other credential (a Kubernetes service
+account is `system:serviceaccount:<namespace>:<name>`, a client certificate its
+SPIFFE ID): `dev@example.com` here. Any account of the issuer authenticates,
+so bind by exact address only.
+
 `actorIdentityJWTProvider` identifies the provider allowed to call
 `ActorIdentity.MintJWT`. Other authenticated providers can call every RPC.
 Authorization and RBAC are not implemented yet, so only configure providers
 whose users should have full control of the entire control plane: every
 atespace, actor, actor template, egress policy, snapshot and worker in the
 cluster.
+
+## Ingress clients
+
+The ingress gateway (the atenet router) can authorize the clients of actors as
+well: with `--ingress-authorization=enforce` it calls `CheckActorAccess` with
+the token each client presents (in the headers `--ingress-token-headers`
+names), which ate-api authenticates like a call's own token and authorizes
+against `can_connect` on the actor: editor of its atespace or above, or a direct
+grant. Without `--experimental-enable-authz` every authenticated client may
+connect.
 
 ## Google Cloud CLI tokens
 

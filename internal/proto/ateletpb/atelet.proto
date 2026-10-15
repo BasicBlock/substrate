@@ -1121,6 +1121,10 @@ message RestoreRequest {
 }
 
 message RestoreResponse {
+  // restored_fidelity is the fidelity the actor was restored at. It is lower
+  // than the request's when a MEMORY restore failed and atelet cold-booted the
+  // actor from the snapshot's root filesystem instead.
+  SnapshotFidelity restored_fidelity = 1;
 }
 
 message PromoteSnapshotRequest {

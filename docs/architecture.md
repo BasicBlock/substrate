@@ -333,7 +333,7 @@ The node-level subsystem manages the physical execution of sandboxes and the mov
 
 A `WorkerPool` selects a **sandbox class** (`spec.sandboxClasses[].name`), and each class has a matching `ateworker` herder image. The sandbox binaries themselves are not baked into the worker image — they, and the pause image holding the sandbox's namespaces, come at runtime from a cluster-scoped [`SandboxConfig`](api-guide.md#3-sandboxconfig-the-sandbox-itself) the `ActorTemplate` names in its sandbox config (naming one is currently required; per-class cluster defaults are planned) and are pinned into each snapshot's manifest so restores stay reproducible across runtime upgrades.
 
-  * **gVisor** (`ateworker-gvisor`, the default): Runs the workload under `runsc` for kernel-level sandboxing. Suspend and resume leverage gVisor's native checkpoint/restore of the sandboxed process tree.
+  * **gVisor** (`ateworker-gvisor`, the default): Runs the workload under `runsc` for kernel-level sandboxing. Suspend and resume leverage gVisor's native checkpoint/restore of the sandboxed process tree. A `MEMORY` snapshot also holds the root filesystem image (`runsc fscheckpoint`), and a resume whose memory image cannot be restored cold-boots from it at `ROOTFS` instead.
 
   * **micro-VM** (`ateworker-microvm`): Runs the workload inside a [Kata Containers](https://katacontainers.io/) guest on the [Cloud Hypervisor](https://www.cloudhypervisor.org/) VMM. Suspend and resume capture a memory-only VM snapshot and restore it on-demand using `userfaultfd` memory demand-paging. Container rootfs writes are host-backed: the overlay is assembled on the host (read-only OCI image lower plus a per-actor writable upper) and served to the guest over the single virtio-fs share, so they cost reclaimable host page cache rather than guest RAM, and `ROOTFS` and `MEMORY` snapshots ship the upper as its own tar (a `ROOTFS` restore puts it back and cold-boots on it). `DurableDir` volumes travel over that same share and are likewise shipped as a tar, so a `VOLUMES` snapshot can capture them without any guest memory. Each volume is a subdirectory of the share, so an actor can have several at no extra cost in devices, which is why the micro-VM class lifts the single-`DurableDir` limit that still applies to gVisor.
 
@@ -497,6 +497,36 @@ An actor in `ACTOR_STATE_RUNNING` or `ACTOR_STATE_CRASHED`, or a paused actor (`
 By default, only actors in `ACTOR_STATE_SUSPENDED` or `ACTOR_STATE_CRASHED` state can be deleted from the Control Plane. With the `any_state` flag enabled, an actor in any state (such as `ACTOR_STATE_RUNNING`) can be deleted directly; the workflow terminates the running containers on the worker, detaches mounted volumes, and frees the worker assignment before deleting the record.
 
 After deletion, the state of the actor (i.e., memory+disk snapshots) is garbage collected.
+
+### Phase 5: Stranded Operations
+
+Suspend, pause, revert and delete each commit their transitional state
+(`ACTOR_STATE_SUSPENDING`, `ACTOR_STATE_PAUSING`, `ACTOR_STATE_REVERTING`,
+`ACTOR_STATE_DELETING`) before doing the work, under a per-actor lease. When
+the process running the workflow goes away first (a restart that outlasts the
+drain, a crash, a lost node) or its caller cancels it, the actor stays in that
+state, and every other operation on it is refused.
+
+Each ate-api replica therefore sweeps the actors, and re-runs the operation of
+any actor in one of these four states that no replica has written for
+`--stranded-actor-min-age` (5 minutes by default). The re-drive takes the
+actor's lease, so it never runs beside a workflow that is alive, and reads the
+actor again under it, so it never acts on a decision gone stale. A re-drive
+that fails is retried after a delay that doubles from 1 to 30 minutes.
+`--enable-stranded-actor-redrive=false` turns it off.
+
+The workflows are re-entrant, so a re-drive continues where the first attempt
+stopped. The exception is a suspend or pause whose first attempt already took
+the checkpoint: the workload is gone, so the second `Checkpoint` fails and the
+actor is `ACTOR_STATE_CRASHED`, like any other failed checkpoint, and
+`RevertActor` returns it to its last durable snapshot. A suspend whose snapshot
+atelet could not upload and kept on its node is finished the way the suspend
+would have: the actor is `ACTOR_STATE_PAUSED` on that node, and suspending it
+again retries the upload.
+
+An actor in `ACTOR_STATE_RESUMING` is not re-driven. A resume is driven by the
+next request, and `ResumeActor` re-enters it; re-driving it with no one waiting
+would start a workload nobody asked for.
 
 ## State Management & Persistence
 

@@ -147,12 +147,16 @@ func ActorStateValue(state ateapipb.ActorState) string {
 // The snapshot keys are orthogonal: kind is which snapshot, scope is what
 // content it covers, and phase is which step of the operation an observation
 // timed. Naming one image within a snapshot is the registry's file.name, not an
-// ate.* key of its own.
+// ate.* key of its own. RestoreFallbackKey is present only on a restore that
+// fell back to a lower fidelity.
 // ImageCacheOutcomeKey is rooted at the subsystem, not under actor: the layer
 // pool is node state every actor shares. For the same reason it is the only
 // ate.* label on its counter.
+// ActorRedriveOutcomeKey is the result of one attempt to finish an operation a
+// workflow left half done.
 const (
 	ActorOperationNameKey  = attribute.Key("ate.actor.operation.name")
+	ActorRedriveOutcomeKey = attribute.Key("ate.actor.redrive.outcome")
 	WorkerPoolNamespaceKey = attribute.Key("ate.workerpool.namespace")
 	WorkerPoolNameKey      = attribute.Key("ate.workerpool.name")
 	WorkerStateKey         = attribute.Key("ate.worker.state")
@@ -165,6 +169,7 @@ const (
 	RouterResumeKey        = attribute.Key("ate.router.resume")
 	RouterOutcomeKey       = attribute.Key("ate.router.outcome")
 	StatsSourceKey         = attribute.Key("ate.stats.source")
+	RestoreFallbackKey     = attribute.Key("ate.restore.fallback")
 )
 
 // Keys of the actor usage record. Logs only: the measurements are unbounded and
@@ -299,6 +304,21 @@ func NormalizeOperationName(op string) string {
 	return OperationUnknown
 }
 
+// Values for ActorRedriveOutcomeKey, the result of one attempt to finish an
+// operation that no workflow was running. Completed is the only outcome that
+// moved the actor to the state the operation was heading for. Crashed means
+// the actor could not be brought there and is CRASHED instead, which
+// RevertActor recovers. Failed means the attempt hit an error and ateapi tries
+// again later. Busy means a workflow holds the actor's lease, and Settled means
+// the actor was no longer waiting to be finished when the attempt looked.
+const (
+	RedriveOutcomeCompleted = "completed"
+	RedriveOutcomeCrashed   = "crashed"
+	RedriveOutcomeFailed    = "failed"
+	RedriveOutcomeBusy      = "busy"
+	RedriveOutcomeSettled   = "settled"
+)
+
 // Values for SchedulerOutcomeKey. NoCapacity is a capacity signal, not a
 // failure, so it is a distinct outcome rather than an error.type value; only the
 // Error outcome carries an error.type.
@@ -345,6 +365,13 @@ func SnapshotFidelityValue(fidelity ateletpb.SnapshotFidelity) string {
 		return SnapshotFidelityUnknown
 	}
 }
+
+// Values for RestoreFallbackKey, present only on a restore that fell back (its
+// absence, not a "none" value, means the normal path ran, so the label set of
+// the common case does not widen). The only fallback today is a MEMORY restore
+// that failed and was recovered by a cold boot from the snapshot's root
+// filesystem image.
+const RestoreFallbackMemoryToRootfs = "memory_to_rootfs"
 
 // Values for SnapshotPhaseKey. Phases overlap (the download runs concurrently
 // with the asset fetch and OCI unpack), so they are independent observations,

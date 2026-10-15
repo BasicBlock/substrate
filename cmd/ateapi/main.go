@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/actoraccess"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/apiauthn"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authz"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
@@ -109,6 +110,10 @@ var (
 
 	templateResyncInterval = pflag.Duration("template-resync-interval", 20*time.Second, fmt.Sprintf("Interval between actor template resyncs. Must be at least %s.", minResyncInterval))
 
+	enableStrandedActorRedrive  = pflag.Bool("enable-stranded-actor-redrive", true, "Finish the suspend, pause, revert or delete of an actor that no workflow is running, such as one a restart of ateapi cut off. Turning it off leaves such an actor in its transitional state until its operation is called again.")
+	strandedActorMinAge         = pflag.Duration("stranded-actor-min-age", 5*time.Minute, "How long an actor in SUSPENDING, REVERTING or DELETING must have gone unwritten before ateapi re-drives its operation. It is the delay before a stranded actor is finished, and gives a client that is retrying the operation time to finish it first. Must be positive.")
+	strandedActorResyncInterval = pflag.Duration("stranded-actor-resync-interval", 2*time.Minute, fmt.Sprintf("Interval between sweeps that list every actor for stranded ones. Each sweep reads every actor, so raise it on a deployment with very many. Must be at least %s.", minResyncInterval))
+
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
 	previewFlags = pflag.StringSlice("preview", nil, "Preview gates to enable.")
@@ -137,6 +142,12 @@ func main() {
 	slog.InfoContext(ctx, "ateapi starting", slog.String("version", version.Version))
 	if *templateResyncInterval < minResyncInterval {
 		serverboot.Fatal(ctx, "Invalid --template-resync-interval", fmt.Errorf("must be at least %s", minResyncInterval))
+	}
+	if *strandedActorMinAge <= 0 {
+		serverboot.Fatal(ctx, "Invalid --stranded-actor-min-age", fmt.Errorf("must be positive, got %s", *strandedActorMinAge))
+	}
+	if *strandedActorResyncInterval < minResyncInterval {
+		serverboot.Fatal(ctx, "Invalid --stranded-actor-resync-interval", fmt.Errorf("must be at least %s", minResyncInterval))
 	}
 	if err := validateActorJWTIssuer(*actorJWTIssuer); err != nil {
 		serverboot.Fatal(ctx, "Invalid --actor-jwt-issuer", err)
@@ -335,6 +346,12 @@ func main() {
 	workerAssignmentReconciler := controlapi.NewWorkerAssignmentReconciler(persistence, workerCache)
 	workerAssignmentReconciler.Start(shutdownCtx)
 
+	// Finish the operations that Actors were left in the middle of.
+	if *enableStrandedActorRedrive {
+		strandedActorReconciler := controlapi.NewStrandedActorReconciler(persistence, controlSrv, *strandedActorMinAge, *strandedActorResyncInterval)
+		strandedActorReconciler.Start(shutdownCtx)
+	}
+
 	lisCfg := &net.ListenConfig{}
 	lis, err := lisCfg.Listen(ctx, "tcp", *listenAddr)
 	if err != nil {
@@ -371,7 +388,16 @@ func main() {
 		),
 	)
 	reflection.Register(mux)
-	ateapipb.RegisterControlServer(mux, controlSrv)
+	// CheckActorAccess's inner can_connect check only runs with
+	// --experimental-enable-authz: without it every authenticated principal
+	// may connect, as it may call every RPC. A nil *authz.Authorizer must reach
+	// actoraccess as a nil interface (a non-nil interface holding a nil pointer
+	// is not nil).
+	var accessAuthorizer actoraccess.Authorizer
+	if *experimentalEnableAuthz {
+		accessAuthorizer = authorizer
+	}
+	ateapipb.RegisterControlServer(mux, controlServer{RPCService: controlSrv, access: actoraccess.New(authCfg, accessAuthorizer)})
 	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence, controlSrv, ateletSPIFFEID, actorIDCAPool, *actorJWTIssuer, actorIDJWTAuthorityPool))
 
 	// Every RPC needs the store, so a replica that cannot reach it leaves the
@@ -389,6 +415,17 @@ func main() {
 	}
 	<-drainDone
 	slog.InfoContext(ctx, "Shutdown complete")
+}
+
+// controlServer adds CheckActorAccess, which needs ate-api's authentication
+// and authorization rather than the store, to the Control service.
+type controlServer struct {
+	*controlapi.RPCService
+	access *actoraccess.Checker
+}
+
+func (s controlServer) CheckActorAccess(ctx context.Context, req *ateapipb.CheckActorAccessRequest) (*ateapipb.CheckActorAccessResponse, error) {
+	return s.access.Check(ctx, req)
 }
 
 func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboot.Readiness) <-chan struct{} {
@@ -486,6 +523,9 @@ func logFlagValues(ctx context.Context) {
 		slog.Duration("drain-delay", *drainDelay),
 		slog.Duration("drain-timeout", *drainTimeout),
 		slog.Any("preview", *previewFlags),
+		slog.Bool("enable-stranded-actor-redrive", *enableStrandedActorRedrive),
+		slog.Duration("stranded-actor-min-age", *strandedActorMinAge),
+		slog.Duration("stranded-actor-resync-interval", *strandedActorResyncInterval),
 	)
 }
 
@@ -650,7 +690,7 @@ func buildJWTProviders(ctx context.Context, cfg *apiauthn.AuthenticationConfig) 
 				if err != nil {
 					return "", err
 				}
-				return claims.Subject, nil
+				return providerCfg.Principal(claims.Raw)
 			},
 		})
 		slog.InfoContext(ctx, "Configured JWT provider", slog.String("name", providerCfg.Name), slog.String("issuer", providerCfg.Issuer))

@@ -580,3 +580,56 @@ func TestWorkerCountSumsToPool(t *testing.T) {
 		t.Errorf("sum over states = %d, want pool size %d", total, len(ws))
 	}
 }
+
+// redriveCount is the value of ate.actor.redrives for one operation and outcome.
+func redriveCount(t *testing.T, reader *sdkmetric.ManualReader, operation, outcome string) int64 {
+	t.Helper()
+	sum, ok := mustMetric(t, reader, actorRedrivesMetric).Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("%s is not an int64 sum", actorRedrivesMetric)
+	}
+	for _, dp := range sum.DataPoints {
+		op, _ := dp.Attributes.Value(ateattr.ActorOperationNameKey)
+		got, _ := dp.Attributes.Value(ateattr.ActorRedriveOutcomeKey)
+		if op.AsString() == operation && got.AsString() == outcome {
+			return dp.Value
+		}
+	}
+	return 0
+}
+
+// TestRecordRedriveShape pins the instrument's name, unit and kind, and that
+// its only labels are the operation and the outcome: the actor's identity
+// belongs on the log record.
+func TestRecordRedriveShape(t *testing.T) {
+	inst, reader := newTestInstruments(t)
+	inst.recordRedrive(context.Background(), ateattr.OperationDelete, ateattr.RedriveOutcomeFailed)
+	inst.recordRedrive(context.Background(), ateattr.OperationDelete, ateattr.RedriveOutcomeFailed)
+	// An operation outside the bounded set cannot widen the label.
+	inst.recordRedrive(context.Background(), "not-an-operation", ateattr.RedriveOutcomeBusy)
+
+	m := mustMetric(t, reader, actorRedrivesMetric)
+	if m.Name != "ate.actor.redrives" || m.Unit != "{redrive}" {
+		t.Errorf("instrument = %q in %q, want ate.actor.redrives in {redrive}", m.Name, m.Unit)
+	}
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok || !sum.IsMonotonic {
+		t.Fatalf("%s data = %T (monotonic: %v), want a monotonic Sum[int64]", m.Name, m.Data, ok && sum.IsMonotonic)
+	}
+	for _, dp := range sum.DataPoints {
+		if dp.Attributes.Len() != 2 {
+			t.Errorf("attributes = %v, want only the operation and the outcome", dp.Attributes.ToSlice())
+		}
+	}
+	if got := redriveCount(t, reader, ateattr.OperationDelete, ateattr.RedriveOutcomeFailed); got != 2 {
+		t.Errorf("delete/failed = %d, want 2", got)
+	}
+	if got := redriveCount(t, reader, ateattr.OperationUnknown, ateattr.RedriveOutcomeBusy); got != 1 {
+		t.Errorf("unknown/busy = %d, want 1", got)
+	}
+}
+
+func TestRecordRedriveOnNilInstruments(t *testing.T) {
+	var inst *Instruments
+	inst.recordRedrive(context.Background(), ateattr.OperationSuspend, ateattr.RedriveOutcomeCompleted)
+}

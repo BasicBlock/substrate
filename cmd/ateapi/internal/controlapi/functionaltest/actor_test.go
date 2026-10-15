@@ -4940,10 +4940,9 @@ func TestSuspendActor_FromPaused(t *testing.T) {
 	}
 }
 
-// TestSuspendActor_FromPaused_UploadFailureCrashes: an atelet error while
-// uploading the paused snapshot crashes the actor like any other atelet
-// error, releasing its worker and making it unsuspendable.
-func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
+// TestSuspendActor_FromPaused_UploadFailureKeepsLocalSnapshot: an atelet error while
+// uploading the paused snapshot keeps the actor resumable on its node, and a later suspend retries the upload.
+func TestSuspendActor_FromPaused_UploadFailureKeepsLocalSnapshot(t *testing.T) {
 	ns := namespaceForTest("ns-suspend-paused-crash")
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
@@ -4979,8 +4978,8 @@ func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
 		t.Fatal("SuspendActor succeeded despite failing upload")
 	}
 	// Atelet's code does not reach the caller.
-	if got := status.Code(err); got != codes.Internal {
-		t.Errorf("status code = %v, want %v (err: %v)", got, codes.Internal, err)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Errorf("status code = %v, want %v (err: %v)", got, codes.Unavailable, err)
 	}
 
 	crashed, err := tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
@@ -4989,13 +4988,12 @@ func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActor failed: %v", err)
 	}
-	if crashed.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_CRASHED {
-		t.Fatalf("state after failed upload = %v, want CRASHED", crashed.GetStatus().GetState())
+	if crashed.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+		t.Fatalf("state after failed upload = %v, want SUSPENDED", crashed.GetStatus().GetState())
 	}
 	if crashed.GetStatus().GetWorkerAssignment() != nil {
 		t.Errorf("expected worker assignment to be cleared, got %v", crashed.GetStatus().GetWorkerAssignment())
 	}
-	assertActorCrashStatus(t, tc, name, "suspend failed: atelet PromoteSnapshot: injected upload failure")
 
 	worker, err := tc.persistence.GetWorker(context.Background(), podUID)
 	if err != nil {
@@ -5005,15 +5003,15 @@ func TestSuspendActor_FromPaused_UploadFailureCrashes(t *testing.T) {
 		t.Errorf("expected worker to be released after crash, still holds %d actors", n)
 	}
 
-	// The crash is terminal: a healthy atelet does not make the actor suspendable.
+	// A healthy atelet uploads the surviving local snapshot.
 	tc.fakeAtelet.Lock.Lock()
 	tc.fakeAtelet.FailPromote = nil
 	tc.fakeAtelet.Lock.Unlock()
 	_, err = tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
 	})
-	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "ACTOR_STATE_CRASHED") {
-		t.Errorf("expected FailedPrecondition/ACTOR_STATE_CRASHED error, got %v", err)
+	if err != nil {
+		t.Fatalf("retrying snapshot upload: %v", err)
 	}
 }
 

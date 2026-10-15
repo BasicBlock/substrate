@@ -415,6 +415,7 @@ func isDebugRedact(fd protoreflect.FieldDescriptor) bool {
 // change is reviewed as a deliberate decision about what the logs may show.
 func TestDebugRedactFieldsArePinned(t *testing.T) {
 	want := map[string]bool{
+		"ateapi.CheckActorAccessRequest.token":           true,
 		"ateapi.EnvVar.value":                            true,
 		"ateapi.MintActorJwtResponse.actor_jwt":          true,
 		"ateapi.MintWorkerActorJwtResponse.actor_jwt":    true,

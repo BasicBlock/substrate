@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1fake "k8s.io/client-go/kubernetes/typed/core/v1/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
@@ -216,7 +218,9 @@ func TestSyncer_Lifecycle(t *testing.T) {
 		t.Fatalf("update pod: %v", err)
 	}
 
-	got := waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool { return w != nil })
+	got := waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool {
+		return w != nil && w.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE
+	})
 	if want := []string{"127.0.0.1"}; !slices.Equal(got.GetIps(), want) {
 		t.Errorf("worker ips = %q, want %q", got.GetIps(), want)
 	}
@@ -296,6 +300,73 @@ func TestSyncer_DoesNotInferCapacityFromThePod(t *testing.T) {
 	}
 }
 
+// TestSyncer_DeletionCostAnnotation verifies that an ACTIVE worker's pod is
+// annotated with corev1.PodDeletionCost by whether an Actor is bound to it —
+// freeWorkerDeletionCost for none, assignedWorkerDeletionCost for one or
+// more — so a WorkerPool scale-down (its Deployment's ReplicaSet choosing
+// which pod to delete) prefers a free worker over one an Actor is running on,
+// and that the pod is patched only when the value would actually change.
+func TestSyncer_DeletionCostAnnotation(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-cost", "pool1", "worker-cost", "10.0.0.9"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.setAllocatedActors(testPodUID, 1)
+	s, pods, _ := setupReconcileTest(t, api, workerPool(ns, poolName, "gvisor", nil))
+
+	fakePods, ok := s.pods.(*corev1fake.FakeCoreV1)
+	if !ok {
+		t.Fatalf("syncer pods is a %T, want *corev1fake.FakeCoreV1", s.pods)
+	}
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	if _, err := fakePods.Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	key := seedPod(t, pods, pod)
+	mustReconcile(t, ctx, s, key)
+
+	getCost := func() string {
+		t.Helper()
+		got, err := fakePods.Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting pod: %v", err)
+		}
+		return got.GetAnnotations()[corev1.PodDeletionCost]
+	}
+
+	if got, want := getCost(), "1000"; got != want {
+		t.Errorf("pod-deletion-cost with an actor assigned = %q, want %q", got, want)
+	}
+	// The informer cache (which reconcile reads pod state from, and which this
+	// synchronous test never wires to a live watch) would catch up to the
+	// patch shortly after in production; reflect that here before continuing.
+	pod.Annotations = map[string]string{corev1.PodDeletionCost: "1000"}
+	if err := pods.Update(pod); err != nil {
+		t.Fatalf("updating cached pod: %v", err)
+	}
+
+	// Freed: the next reconcile (a real pod event, or the informer's periodic
+	// resync) drops the annotation back to the free cost.
+	api.setAllocatedActors(testPodUID, 0)
+	mustReconcile(t, ctx, s, key)
+	if got, want := getCost(), "0"; got != want {
+		t.Errorf("pod-deletion-cost with no actor assigned = %q, want %q", got, want)
+	}
+	pod.Annotations = map[string]string{corev1.PodDeletionCost: "0"}
+	if err := pods.Update(pod); err != nil {
+		t.Fatalf("updating cached pod: %v", err)
+	}
+
+	// Reconciling again with nothing changed must not re-patch the pod: verify
+	// by making any further patch fail the test if it lands.
+	fakePods.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		t.Error("unexpected pod patch: the annotation already matched")
+		return false, nil, nil
+	})
+	mustReconcile(t, ctx, s, key)
+}
+
 // TestSyncer_SoftDelete_MarksDraining verifies that a pod entering Terminating
 // (DeletionTimestamp set) flips its worker to STATE_DRAINING without deleting
 // the worker record — the actor inside is still gracefully shutting down.
@@ -317,6 +388,187 @@ func TestSyncer_SoftDelete_MarksDraining(t *testing.T) {
 	}
 	if w.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_DRAINING {
 		t.Errorf("worker state = %v, want DRAINING", w.GetStatus().GetState())
+	}
+}
+
+// TestSyncer_SoftDelete_SuspendsBoundActors verifies that a Terminating worker
+// pod gets its Actors suspended, so they resume elsewhere from a fresh
+// snapshot instead of being stopped with the pod.
+func TestSyncer_SoftDelete_SuspendsBoundActors(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-suspend", "pool1", "worker-suspend", "10.0.0.5"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "one"})
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "two"})
+	s, pods, _ := setupReconcileTest(t, api)
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	mustReconcile(t, ctx, s, seedPod(t, pods, pod))
+
+	waitForSuspendPass(t, s, testPodUID)
+	if got, want := api.suspended(), []string{"a/one", "a/two"}; !slices.Equal(got, want) {
+		t.Errorf("suspended = %v, want %v", got, want)
+	}
+	if got := api.get(testPodUID).GetStatus().GetState(); got != ateapipb.WorkerState_WORKER_STATE_DRAINING {
+		t.Errorf("worker state = %v, want DRAINING", got)
+	}
+}
+
+func TestSyncer_ForceDelete_DoesNotSuspendBoundActors(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-force", "pool1", "worker-force", "10.0.0.7"
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "one"})
+	s, pods, _ := setupReconcileTest(t, api)
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	pod.DeletionGracePeriodSeconds = new(int64)
+	mustReconcile(t, ctx, s, seedPod(t, pods, pod))
+	waitForSuspendPass(t, s, testPodUID)
+	if got := api.suspended(); len(got) != 0 {
+		t.Errorf("suspended = %v: a force-deleted pod has no checkpoint grace period", got)
+	}
+	if got := api.get(testPodUID).GetStatus().GetState(); got != ateapipb.WorkerState_WORKER_STATE_DRAINING {
+		t.Errorf("worker state = %v, want DRAINING while deletion finishes", got)
+	}
+}
+
+// TestSyncer_SoftDelete_RetriesTransientSuspendFailureWithinPass verifies that
+// a transient SuspendActor failure (the shape an ate-api Unavailable, or an
+// atelet being replaced mid-release, takes) is retried with backoff inside the
+// same pass rather than left for the next pod event, while an Actor that is
+// not running (FailedPrecondition) is tried once and left alone.
+func TestSyncer_SoftDelete_RetriesTransientSuspendFailureWithinPass(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-retry", "pool1", "worker-retry", "10.0.0.6"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "flaky"})
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "crashed"})
+	var flakyAttempts atomic.Int32
+	api.setSuspendHook(func(ref *ateapipb.ObjectRef) error {
+		switch ref.GetName() {
+		case "crashed":
+			return status.Error(codes.FailedPrecondition, "actor is CRASHED")
+		case "flaky":
+			if flakyAttempts.Add(1) < 3 {
+				return status.Error(codes.Unavailable, "atelet unreachable")
+			}
+		}
+		return nil
+	})
+	s, pods, _ := setupReconcileTest(t, api)
+	s.suspendBackoff = time.Millisecond
+	s.suspendBackoffCap = 2 * time.Millisecond
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	key := seedPod(t, pods, pod)
+	mustReconcile(t, ctx, s, key)
+	waitForSuspendPass(t, s, testPodUID)
+
+	if got := flakyAttempts.Load(); got != 3 {
+		t.Errorf("flaky suspend attempts = %d, want 3 (2 failures then a success), all within the one pass", got)
+	}
+	// "crashed" fails FailedPrecondition, which is terminal: exactly one
+	// attempt, in a single pass, with no second pod event required.
+	if got, want := api.suspended(), []string{"a/flaky", "a/flaky", "a/flaky", "a/crashed"}; !slices.Equal(got, want) {
+		t.Errorf("suspended = %v, want %v", got, want)
+	}
+}
+
+// TestSyncer_SoftDelete_SuspendRetryStopsWhenPodGone verifies that a suspend
+// retry loop gives up once the Worker's pod is gone, rather than retrying a
+// transient failure until the pass's overall drainSuspendTimeout.
+func TestSyncer_SoftDelete_SuspendRetryStopsWhenPodGone(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-podgone", "pool1", "worker-podgone", "10.0.0.8"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "stuck"})
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var attempts atomic.Int32
+	api.setSuspendHook(func(*ateapipb.ObjectRef) error {
+		if attempts.Add(1) == 1 {
+			close(blocked)
+			<-release
+		}
+		return status.Error(codes.Unavailable, "atelet unreachable")
+	})
+	s, pods, _ := setupReconcileTest(t, api)
+	s.suspendBackoff = time.Millisecond
+	s.suspendBackoffCap = 2 * time.Millisecond
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	key := seedPod(t, pods, pod)
+	mustReconcile(t, ctx, s, key)
+
+	// Let the first (in-flight) suspend attempt land, then remove the pod from
+	// the cache the way a Pod Deleted event would, while that attempt is still
+	// blocked, so podGone becomes true before the retry loop's next check.
+	<-blocked
+	if err := pods.Delete(pod); err != nil {
+		t.Fatalf("deleting pod from cache: %v", err)
+	}
+	close(release)
+
+	waitForSuspendPass(t, s, testPodUID)
+
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("suspend attempts = %d, want exactly 1: the retry loop should have abandoned after the pod was gone", got)
+	}
+}
+
+// TestSyncer_SoftDelete_OneSuspendPassAtATime verifies that events arriving
+// while a pass is suspending a Worker's Actors do not start another.
+func TestSyncer_SoftDelete_OneSuspendPassAtATime(t *testing.T) {
+	ctx := context.Background()
+	ns, poolName, podName, ip := "ns-once", "pool1", "worker-once", "10.0.0.7"
+
+	api := newFakeControl()
+	api.put(registeredWorker(ns, poolName, podName, testPodUID, ip))
+	api.bind(testPodUID, &ateapipb.ObjectRef{Atespace: "a", Name: "slow"})
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	api.setSuspendHook(func(*ateapipb.ObjectRef) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	})
+	s, pods, _ := setupReconcileTest(t, api)
+
+	pod := workerPod(ns, podName, poolName, testPodUID, ip)
+	pod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	key := seedPod(t, pods, pod)
+	mustReconcile(t, ctx, s, key)
+	<-entered
+	mustReconcile(t, ctx, s, key)
+	mustReconcile(t, ctx, s, key)
+	close(release)
+	waitForSuspendPass(t, s, testPodUID)
+
+	if got := api.suspended(); len(got) != 1 {
+		t.Errorf("suspended = %v, want a single suspend", got)
+	}
+}
+
+// waitForSuspendPass waits until no suspend pass is running for the Worker.
+func waitForSuspendPass(t *testing.T, s *WorkerPoolSyncer, worker string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(context.Background(), 5*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
+		_, running := s.suspending.Load(worker)
+		return !running, nil
+	})
+	if err != nil {
+		t.Fatalf("suspend pass for worker %s did not finish: %v", worker, err)
 	}
 }
 

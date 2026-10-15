@@ -3795,9 +3795,13 @@ func (x *RestoreRequest) GetSandboxAssets() *SandboxAssets {
 }
 
 type RestoreResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// restored_fidelity is the fidelity the actor was restored at. It is lower
+	// than the request's when a MEMORY restore failed and atelet cold-booted the
+	// actor from the snapshot's root filesystem instead.
+	RestoredFidelity SnapshotFidelity `protobuf:"varint,1,opt,name=restored_fidelity,json=restoredFidelity,proto3,enum=atelet.SnapshotFidelity" json:"restored_fidelity,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RestoreResponse) Reset() {
@@ -3828,6 +3832,13 @@ func (x *RestoreResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RestoreResponse.ProtoReflect.Descriptor instead.
 func (*RestoreResponse) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *RestoreResponse) GetRestoredFidelity() SnapshotFidelity {
+	if x != nil {
+		return x.RestoredFidelity
+	}
+	return SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 }
 
 type PromoteSnapshotRequest struct {
@@ -4210,8 +4221,9 @@ const file_atelet_proto_rawDesc = "" +
 	"\tcpu_milli\x18\x0e \x01(\x03R\bcpuMilli\x12!\n" +
 	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x12<\n" +
 	"\x0esandbox_assets\x18\x10 \x01(\v2\x15.atelet.SandboxAssetsR\rsandboxAssetsB\x11\n" +
-	"\x0f_egress_gateway\"\x11\n" +
-	"\x0fRestoreResponse\"\x86\x02\n" +
+	"\x0f_egress_gateway\"X\n" +
+	"\x0fRestoreResponse\x12E\n" +
+	"\x11restored_fidelity\x18\x01 \x01(\x0e2\x18.atelet.SnapshotFidelityR\x10restoredFidelity\"\x86\x02\n" +
 	"\x16PromoteSnapshotRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -4389,33 +4401,34 @@ var file_atelet_proto_depIdxs = []int32{
 	49, // 55: atelet.RestoreRequest.snapshot:type_name -> atelet.Snapshot
 	25, // 56: atelet.RestoreRequest.egress_gateway:type_name -> atelet.EgressGateway
 	28, // 57: atelet.RestoreRequest.sandbox_assets:type_name -> atelet.SandboxAssets
-	49, // 58: atelet.PromoteSnapshotRequest.snapshot:type_name -> atelet.Snapshot
-	51, // 59: atelet.PromoteSnapshotResponse.state:type_name -> atelet.ActorSnapshotState
-	26, // 60: atelet.ArchAssets.FilesEntry.value:type_name -> atelet.AssetFile
-	27, // 61: atelet.SandboxAssets.AssetsEntry.value:type_name -> atelet.ArchAssets
-	20, // 62: atelet.WorkerSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
-	3,  // 63: atelet.WorkerSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
-	11, // 64: atelet.WorkerSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
-	13, // 65: atelet.WorkerSupport.GetActorEgressPolicy:input_type -> atelet.GetActorEgressPolicyRequest
-	24, // 66: atelet.Atelet.Run:input_type -> atelet.RunRequest
-	53, // 67: atelet.Atelet.Checkpoint:input_type -> atelet.CheckpointRequest
-	55, // 68: atelet.Atelet.Restore:input_type -> atelet.RestoreRequest
-	57, // 69: atelet.Atelet.PromoteSnapshot:input_type -> atelet.PromoteSnapshotRequest
-	22, // 70: atelet.Atelet.Terminate:input_type -> atelet.TerminateRequest
-	21, // 71: atelet.WorkerSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
-	10, // 72: atelet.WorkerSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
-	12, // 73: atelet.WorkerSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
-	14, // 74: atelet.WorkerSupport.GetActorEgressPolicy:output_type -> atelet.GetActorEgressPolicyResponse
-	47, // 75: atelet.Atelet.Run:output_type -> atelet.RunResponse
-	54, // 76: atelet.Atelet.Checkpoint:output_type -> atelet.CheckpointResponse
-	56, // 77: atelet.Atelet.Restore:output_type -> atelet.RestoreResponse
-	58, // 78: atelet.Atelet.PromoteSnapshot:output_type -> atelet.PromoteSnapshotResponse
-	23, // 79: atelet.Atelet.Terminate:output_type -> atelet.TerminateResponse
-	71, // [71:80] is the sub-list for method output_type
-	62, // [62:71] is the sub-list for method input_type
-	62, // [62:62] is the sub-list for extension type_name
-	62, // [62:62] is the sub-list for extension extendee
-	0,  // [0:62] is the sub-list for field type_name
+	1,  // 58: atelet.RestoreResponse.restored_fidelity:type_name -> atelet.SnapshotFidelity
+	49, // 59: atelet.PromoteSnapshotRequest.snapshot:type_name -> atelet.Snapshot
+	51, // 60: atelet.PromoteSnapshotResponse.state:type_name -> atelet.ActorSnapshotState
+	26, // 61: atelet.ArchAssets.FilesEntry.value:type_name -> atelet.AssetFile
+	27, // 62: atelet.SandboxAssets.AssetsEntry.value:type_name -> atelet.ArchAssets
+	20, // 63: atelet.WorkerSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
+	3,  // 64: atelet.WorkerSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
+	11, // 65: atelet.WorkerSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
+	13, // 66: atelet.WorkerSupport.GetActorEgressPolicy:input_type -> atelet.GetActorEgressPolicyRequest
+	24, // 67: atelet.Atelet.Run:input_type -> atelet.RunRequest
+	53, // 68: atelet.Atelet.Checkpoint:input_type -> atelet.CheckpointRequest
+	55, // 69: atelet.Atelet.Restore:input_type -> atelet.RestoreRequest
+	57, // 70: atelet.Atelet.PromoteSnapshot:input_type -> atelet.PromoteSnapshotRequest
+	22, // 71: atelet.Atelet.Terminate:input_type -> atelet.TerminateRequest
+	21, // 72: atelet.WorkerSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
+	10, // 73: atelet.WorkerSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
+	12, // 74: atelet.WorkerSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
+	14, // 75: atelet.WorkerSupport.GetActorEgressPolicy:output_type -> atelet.GetActorEgressPolicyResponse
+	47, // 76: atelet.Atelet.Run:output_type -> atelet.RunResponse
+	54, // 77: atelet.Atelet.Checkpoint:output_type -> atelet.CheckpointResponse
+	56, // 78: atelet.Atelet.Restore:output_type -> atelet.RestoreResponse
+	58, // 79: atelet.Atelet.PromoteSnapshot:output_type -> atelet.PromoteSnapshotResponse
+	23, // 80: atelet.Atelet.Terminate:output_type -> atelet.TerminateResponse
+	72, // [72:81] is the sub-list for method output_type
+	63, // [63:72] is the sub-list for method input_type
+	63, // [63:63] is the sub-list for extension type_name
+	63, // [63:63] is the sub-list for extension extendee
+	0,  // [0:63] is the sub-list for field type_name
 }
 
 func init() { file_atelet_proto_init() }

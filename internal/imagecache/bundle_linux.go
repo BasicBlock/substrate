@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -59,9 +60,26 @@ func SetupBundleRootfs(bundlePath string) error {
 	rootfs := filepath.Join(bundlePath, "rootfs")
 	upper := filepath.Join(bundlePath, "upper")
 	work := filepath.Join(bundlePath, "work")
-	for _, d := range []string{rootfs, upper, work} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return fmt.Errorf("while creating %q: %w", d, err)
+	// Overlayfs exposes the upper directory's mode as the merged root mode.
+	// Keep the root and upper searchable by image-defined non-root users; a
+	// 0700 upper makes every absolute path inaccessible after setuid(2), even
+	// when the image's files and directories have correct OCI metadata. The
+	// work directory remains private to the overlay implementation.
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: rootfs, mode: 0o755},
+		{path: upper, mode: 0o755},
+		{path: work, mode: 0o700},
+	} {
+		if err := os.MkdirAll(d.path, d.mode); err != nil {
+			return fmt.Errorf("while creating %q: %w", d.path, err)
+		}
+		// prepareOCIDirectory may have created this directory with a stricter
+		// mode. MkdirAll does not update an existing directory.
+		if err := os.Chmod(d.path, d.mode); err != nil {
+			return fmt.Errorf("while setting mode on %q: %w", d.path, err)
 		}
 	}
 
@@ -77,7 +95,17 @@ func SetupBundleRootfs(bundlePath string) error {
 	}
 
 	if err := mountOverlay(rootfs, overlayLowerDirs(spec.Layers), upper, work); err != nil {
-		return fmt.Errorf("while mounting overlay rootfs at %q: %w", rootfs, err)
+		// A lazily detached overlay from a failed attempt on this bundle (a
+		// Full restore before its filesystem fallback) can still hold the
+		// upper and work directories, and the kernel refuses a second
+		// superblock over them. Set them aside and retry once with fresh
+		// ones; the bundle directory's removal takes the stale ones along.
+		if !freshOverlayDirs(upper, work) {
+			return fmt.Errorf("while mounting overlay rootfs at %q: %w", rootfs, err)
+		}
+		if retryErr := mountOverlay(rootfs, overlayLowerDirs(spec.Layers), upper, work); retryErr != nil {
+			return fmt.Errorf("while mounting overlay rootfs at %q: %w (with fresh upper and work: %v)", rootfs, err, retryErr)
+		}
 	}
 
 	if err := createExtraDirs(rootfs, spec.ExtraDirs); err != nil {
@@ -99,6 +127,24 @@ func SetupBundleRootfs(bundlePath string) error {
 		return fmt.Errorf("while setting up image volumes: %w", err)
 	}
 	return nil
+}
+
+// freshOverlayDirs renames upper and work aside and recreates them empty,
+// reporting whether that succeeded.
+func freshOverlayDirs(upper, work string) bool {
+	suffix := fmt.Sprintf(".stale-%d", time.Now().UnixNano())
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{{path: upper, mode: 0o755}, {path: work, mode: 0o700}} {
+		if err := os.Rename(d.path, d.path+suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		if err := os.MkdirAll(d.path, d.mode); err != nil || os.Chmod(d.path, d.mode) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // setupImageVolumes exposes each image volume's contents read-only at its

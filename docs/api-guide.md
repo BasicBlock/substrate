@@ -548,12 +548,16 @@ When an `ActorTemplate` is created with golden snapshots enabled:
 ### Resumption Lifecycle
 Once a template is `Ready`, creating an actor logically (via `kubectl ate create actor`) allows it to be resumed instantly on any free worker in the referenced `WorkerPool`. Substrate bypasses the standard container boot and restores the process directly from its last saved state.
 
+### Restoring when the memory image cannot be used (gVisor)
+
+A gVisor `MEMORY` snapshot also holds the actor's root filesystem image (`runsc fscheckpoint` of every container's root filesystem, taken at the same paused instant as the memory image), unless its template has `DurableDir` volumes, whose own image takes runsc's one filesystem-restore slot. A memory image restores only where `runsc`, the CPU features and the container spec match the ones that took it, so when atelet's memory restore fails and the snapshot holds the root filesystem, atelet cold-boots the actor from it at `ROOTFS` instead of crashing it: the files and image come back, the processes do not. `RestoreResponse.restored_fidelity` reports it, ate-api logs it, and `ate.actor.restore.duration` carries `ate.restore.fallback=memory_to_rootfs`. A restore that failed because its caller gave up, or because the worker was draining, is not a fallback. A snapshot taken without the root filesystem image (its capture is best-effort) has no fallback and keeps today's behavior. The image adds `pause` and `fscheckpoint` phases to the checkpoint, which cost tens of seconds and some gigabytes for a large workspace.
+
 ### Eviction
 A worker pod can go away while it hosts running actors: when its `WorkerPool` rolls to a new worker image or pod template, as in an [upgrade](upgrade.md), or scales down, when its node is drained, or when its Spot VM is reclaimed.
 
 When the pod gets `SIGTERM`, its worker stops accepting actors and sends `SIGTERM` to the main process of each container of every actor it hosts. Each actor then has 30 minutes, counted from the pod's `SIGTERM`, to be suspended. An actor suspended in that window keeps its state and resumes on another worker like any suspended actor.
 
-Substrate does not suspend the actor for you. Whatever drives the actor, usually its harness, has to call `SuspendActor` (`kubectl ate suspend`) within the 30 minutes. Only the actor gets the `SIGTERM`, so it has to pass that on, for example on an endpoint the harness polls.
+atecontroller suspends the actors bound to a terminating worker, and the worker waits up to `--drain-suspend-wait` (5 minutes by default) for that checkpoint to end the session before it sends the `SIGTERM`. If that suspend does not happen, whatever drives the actor, usually its harness, has to call `SuspendActor` (`kubectl ate suspend`) within the 30 minutes. Only the actor gets the `SIGTERM`, so it has to pass that on, for example on an endpoint the harness polls.
 
 Every actor that must keep its state through an eviction needs a `SIGTERM` handler that:
 
@@ -571,7 +575,8 @@ The node can cut the 30 minutes short. GKE node upgrades and cluster autoscaler 
 *   **Startup Logic:** Place expensive initialization (loading large models, establishing baseline connections) in your application's entry point. When golden snapshots are enabled, this initialization can be captured in the Golden Snapshot. Actors that cold-boot run initialization again.
 *   **Placement:** Ensure your `ActorTemplate`'s `sandboxClass` matches your `WorkerPool`'s `sandboxClasses[].name`, and use the template's `workerSelector` to target specific pools — pool selection is by label match, not by namespace or RBAC.
 *   **Version Management:** When updating code, create a new `ActorTemplate` (e.g. `v2`). Substrate treats each template as an immutable state root.
-*   **Eviction:** Give every actor a `SIGTERM` handler that does not exit, and have the actor suspended within 30 minutes of it. See [Eviction](#eviction).
+*   **Eviction:** When its worker pod is evicted, the controller suspends the actor, retrying a failed suspend with backoff until it succeeds, the actor no longer needs saving there (deleted, or not running), or the pod is gone, and the actor resumes on another worker from that snapshot on its next request. The worker waits up to `--drain-suspend-wait` (5 minutes by default) for the suspend to end the session; if none does, give every actor a `SIGTERM` handler that does not exit, and have the actor suspended within 30 minutes of it. See [Eviction](#eviction).
+*   **Scale-down:** A WorkerPool scale-down (an HPA shrinking its `replicas`) deletes its Deployment's lowest-`pod-deletion-cost` pods first. The controller keeps that annotation on every worker pod — low for a free worker, high for one an Actor is bound to — so scale-down removes free capacity before it evicts a running Actor.
 
 ---
 

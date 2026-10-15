@@ -78,6 +78,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	kubeinformers "k8s.io/client-go/informers"
@@ -343,6 +344,15 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to create ateapi client", err)
 	}
 	defer ateapiConn.Close()
+
+	// Pull the images of the templates this node's workers can run before
+	// their first actor needs them. Best-effort, like the SandboxConfig
+	// prewarm: the pull inside an actor start remains the correctness path.
+	var nodeWorkerPools func(context.Context) map[string]workerPoolRef
+	if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
+		nodeWorkerPools = newWorkerPoolFetcher(k8sClient, nodeName)
+	}
+	startTemplateImagePrewarm(ctx, *templateImagePrewarmInterval, ateapipb.NewControlClient(ateapiConn), imageCache, nodeWorkerPools)
 
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(*port))
 	if err != nil {
@@ -799,7 +809,7 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 
 	s.systemInfoVolumes.Deregister(actorUID)
 
-	sandboxRec.SnapshotFiles, sandboxRec.DataSnapshotFiles, err = checkpointSnapshotFiles(resp, shouldHaveSnapshots(req))
+	sandboxRec.SnapshotFiles, sandboxRec.DataSnapshotFiles, sandboxRec.RootfsSnapshotFiles, err = checkpointSnapshotFiles(resp, shouldHaveSnapshots(req))
 	if err != nil {
 		return nil, err
 	}
@@ -850,47 +860,59 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		}
 		state = s.snapshots.CommitLocal(actorUID, snap)
 	case ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE:
-		// CheckpointWorkload has already deleted the workload, so a retried
-		// Checkpoint cannot redo this upload. It waits for the object-store plugin
-		// as long as ctx allows, and a plugin error reaches the control plane as
-		// Internal, which crashes the actor.
-		// TODO(#362): Because we do not cache the external snapshot files when upload fails, we have to mark the Actor as CRASHED.
 		if err := s.uploadExternalCheckpoint(ctx, req, checkpointDir, sandboxRec); err != nil {
-			dPersist = time.Since(tPersist)
-			return nil, fmt.Errorf("while uploading external snapshot: %w", err)
+			if req.GetAtespace() == resources.GoldenActorAtespace {
+				return nil, fmt.Errorf("while uploading golden snapshot: %w", err)
+			}
+			if keepErr := s.moveLocalCheckpoint(context.WithoutCancel(ctx), req, sandboxRec); keepErr != nil {
+				return nil, fmt.Errorf("while uploading external snapshot: %w (keeping local snapshot: %v)", err, keepErr)
+			}
+			snap.Snapshot = proto.CloneOf(req.GetSnapshot())
+			snap.Snapshot.Object = nil
+			state = s.snapshots.CommitLocal(actorUID, snap)
+			slog.WarnContext(ctx, "Kept a snapshot on the node after its upload failed", slog.Any("actor", actorRef), slog.Any("err", err))
+		} else {
+			snap.UploadTime = time.Now()
+			state = s.snapshots.CommitDurable(actorUID, snap)
 		}
-		snap.UploadTime = time.Now()
-		state = s.snapshots.CommitDurable(actorUID, snap)
 	default:
 		return nil, fmt.Errorf("unexpected upload mode: %v", mode)
 	}
 	dPersist = time.Since(tPersist)
 
+	var teardownErr error
 	if err := s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes()); err != nil {
-		return nil, fmt.Errorf("while unmounting external volumes: %w", err)
+		teardownErr = fmt.Errorf("while unmounting external volumes: %w", err)
+	} else if err := resetActorDirs(actorUID); err != nil {
+		teardownErr = fmt.Errorf("while resetting actor dirs: %w", err)
 	}
-
-	// Note: we do not crash the actor if resetting the directory fails.
-	if err := resetActorDirs(actorUID); err != nil {
-		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
+	if teardownErr != nil {
+		if req.GetUploadConfig().GetMode() != ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE {
+			return nil, teardownErr
+		}
+		slog.WarnContext(ctx, "Failed to tear down after persisting a snapshot", slog.Any("actor", actorRef), slog.Any("err", teardownErr))
 	}
 
 	return &ateletpb.CheckpointResponse{State: state}, nil
 }
 
-func checkpointSnapshotFiles(resp *ateworkerpb.CheckpointWorkloadResponse, required bool) (files, dataFiles []string, err error) {
+func checkpointSnapshotFiles(resp *ateworkerpb.CheckpointWorkloadResponse, required bool) (files, dataFiles, rootfsFiles []string, err error) {
 	files = resp.GetSnapshotFiles()
 	if len(files) == 0 && required {
-		return nil, nil, errors.New("worker reported no snapshot files for checkpoint")
+		return nil, nil, nil, errors.New("ateom reported no snapshot files for checkpoint")
 	}
 	if err := validateSnapshotFiles(files); err != nil {
-		return nil, nil, fmt.Errorf("worker reported invalid snapshot files: %w", err)
+		return nil, nil, nil, fmt.Errorf("ateom reported invalid snapshot files: %w", err)
 	}
 	dataFiles = resp.GetDataSnapshotFiles()
 	if err := validateDataSnapshotFiles(files, dataFiles); err != nil {
-		return nil, nil, fmt.Errorf("worker reported invalid data snapshot files: %w", err)
+		return nil, nil, nil, fmt.Errorf("ateom reported invalid data snapshot files: %w", err)
 	}
-	return files, dataFiles, nil
+	rootfsFiles = resp.GetRootfsSnapshotFiles()
+	if err := validateRootfsSnapshotFiles(files, rootfsFiles); err != nil {
+		return nil, nil, nil, fmt.Errorf("ateom reported invalid rootfs snapshot files: %w", err)
+	}
+	return files, dataFiles, rootfsFiles, nil
 }
 
 // toWorkerFidelity maps the atelet enum onto the identical worker one, level by
@@ -1096,7 +1118,7 @@ func (s *Atelet) uploadLocalCheckpointDir(ctx context.Context, req *ateletpb.Pro
 			return "", nil
 		}
 		if status.Code(fetchErr) == codes.NotFound {
-			return "", fmt.Errorf("local snapshot %q is gone and no uploaded copy exists: %w",
+			return "", apierror.NotFound("local snapshot %q is gone and no uploaded copy exists: %v",
 				localSnapshotName, fetchErr)
 		}
 		return "", fmt.Errorf("while probing for an already-uploaded snapshot manifest: %w", fetchErr)
@@ -1365,26 +1387,65 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 	actorDirs := ateletpath.ActorDirs(actorUID)
 	actorDirs.RestoreDir = checkpointDir
 
-	// The worker_restore phase is opaque from here; worker logs its own breakdown of
+	// restoreWorkloadRequest builds the ateom RestoreWorkload request for a
+	// fidelity, so a MEMORY attempt and its ROOTFS fallback (below) send an
+	// identical request but for that one field.
+	restoreWorkloadRequest := func(fidelity ateworkerpb.SnapshotFidelity) *ateworkerpb.RestoreWorkloadRequest {
+		return &ateworkerpb.RestoreWorkloadRequest{
+			Atespace:              actorRef.Atespace,
+			ActorName:             actorRef.Name,
+			ActorTemplateAtespace: req.GetActorTemplateAtespace(),
+			ActorTemplateName:     req.GetActorTemplateName(),
+			RunscPath:             runscPathFor(assetPaths),
+			RuntimeAssetPaths:     assetPaths,
+			Spec:                  spec,
+			Fidelity:              fidelity,
+			ActorUid:              req.GetActorUid(),
+			ActorDirs:             actorDirs,
+			PreserveRestoreDir:    directLocal,
+			EgressGateway:         toWorkerEgressGateway(req.GetEgressGateway()),
+			CpuMilli:              req.GetCpuMilli(),
+			MemoryBytes:           req.GetMemoryBytes(),
+		}
+	}
+
+	// The ateom_restore phase is opaque from here; ateom logs its own breakdown of
 	// this call as "Actor restore phases".
 	tWorker := time.Now()
-	_, err = client.RestoreWorkload(ctx, &ateworkerpb.RestoreWorkloadRequest{
-		Atespace:              actorRef.Atespace,
-		ActorName:             actorRef.Name,
-		ActorTemplateAtespace: req.GetActorTemplateAtespace(),
-		ActorTemplateName:     req.GetActorTemplateName(),
-		RunscPath:             runscPathFor(assetPaths),
-		RuntimeAssetPaths:     assetPaths,
-		Spec:                  spec,
-		Fidelity:              toWorkerFidelity(req.GetSnapshot().GetFidelity()),
-		ActorUid:              req.GetActorUid(),
-		ActorDirs:             actorDirs,
-		PreserveRestoreDir:    directLocal,
-		EgressGateway:         toWorkerEgressGateway(req.GetEgressGateway()),
-		CpuMilli:              req.GetCpuMilli(),
-		MemoryBytes:           req.GetMemoryBytes(),
-	})
+	_, err = client.RestoreWorkload(ctx, restoreWorkloadRequest(toWorkerFidelity(req.GetSnapshot().GetFidelity())))
 	dWorker = time.Since(tWorker)
+	restoredFidelity := req.GetSnapshot().GetFidelity()
+	if err != nil && canFallBackToRootfs(ctx, req.GetSnapshot().GetFidelity(), sandboxRec, err) {
+		// A MEMORY restore can fail for reasons no retry of the same request
+		// fixes: a worker whose CPU features, gVisor or mounts differ from the
+		// ones that took the snapshot, or a snapshot too old for the sandbox
+		// now running. The snapshot also holds the root filesystem (the
+		// checkpoint that wrote it captured one beside the memory image), so
+		// cold-boot from it rather than crash the actor and lose the files.
+		// ateom's own failure cleanup has already returned it to "available",
+		// and the checkpoint files this attempt used are untouched, so the
+		// retry needs no new download.
+		memoryErr := err
+		slog.LogAttrs(ctx, slog.LevelWarn, "MEMORY restore failed; the snapshot holds its root filesystem, falling back to a cold boot from it",
+			append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", memoryErr))...)
+		tFallback := time.Now()
+		_, fallbackErr := client.RestoreWorkload(ctx, restoreWorkloadRequest(ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS))
+		dWorker += time.Since(tFallback)
+		if fallbackErr != nil {
+			slog.LogAttrs(ctx, slog.LevelError, "ROOTFS fallback restore also failed; giving up on the snapshot",
+				append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("memory_restore_err", memoryErr), slog.Any("fallback_err", fallbackErr))...)
+			// Report the original MEMORY failure: it is the actionable one (the
+			// fallback failing too usually means the node or the downloaded
+			// snapshot itself is broken, not the memory image).
+		} else {
+			slog.LogAttrs(ctx, slog.LevelInfo, "Restored from the snapshot's root filesystem after a MEMORY restore failure",
+				ateattr.ActorRefLogAttrs(actorRef)...)
+			restoredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+			op.fidelity = ateattr.SnapshotFidelityValue(restoredFidelity)
+			op.fallback = ateattr.RestoreFallbackMemoryToRootfs
+			err = nil
+		}
+	}
 	if err != nil {
 		// TODO: classify the errors returned by Worker and crash the actor if needed.
 		return nil, fmt.Errorf("while calling worker RestoreWorkload: %w", err)
@@ -1398,7 +1459,24 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 		return nil, err
 	}
 
-	return &ateletpb.RestoreResponse{}, nil
+	return &ateletpb.RestoreResponse{RestoredFidelity: restoredFidelity}, nil
+}
+
+// canFallBackToRootfs reports whether a failed restore at fidelity may be
+// retried as a cold boot from the snapshot's root filesystem: it was a MEMORY
+// restore, the snapshot holds a root filesystem, and the failure is not one a
+// retry elsewhere fixes. A caller that gave up, or an ateom that is gone or
+// draining (Unavailable), is retried by the control plane with its memory
+// intact, so those never cost the actor its processes.
+func canFallBackToRootfs(ctx context.Context, fidelity ateletpb.SnapshotFidelity, rec *sandboxAssetsRecord, err error) bool {
+	if fidelity != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY || len(rec.RootfsSnapshotFiles) == 0 || ctx.Err() != nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded:
+		return false
+	}
+	return true
 }
 
 // Terminate terminates any running workload on worker, unmounts external volumes,
@@ -1411,17 +1489,28 @@ func (s *Atelet) Terminate(ctx context.Context, req *ateletpb.TerminateRequest) 
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	actorUID := req.GetActorUid()
 
+	// Run records the sandbox before starting the workload and Restore records
+	// it only after ateom succeeds, so a missing record means no workload was
+	// ever started here (ateom tears down a failed start itself) or an earlier
+	// Terminate already reclaimed the actor. Either way there is nothing for
+	// ateom to stop; continue reclaiming node state so delete stays idempotent.
+	var sandboxRec *sandboxAssetsRecord
 	if req.GetWorkerPodUid() != "" {
-		var assetPaths map[string]string
-		sandboxRec, err := readSandboxRecord(actorUID)
-		if err != nil {
+		rec, err := readSandboxRecord(actorUID)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			slog.InfoContext(ctx, "No sandbox record during terminate; skipping ateom teardown", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
+		case err != nil:
 			return nil, fmt.Errorf("failed to read sandbox record during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+		default:
+			sandboxRec = rec
 		}
+	}
+	if sandboxRec != nil {
 		paths, err := s.ensureSandboxAssets(ctx, sandboxRec)
 		if err != nil {
 			return nil, fmt.Errorf("failed to ensure sandbox assets during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 		}
-		assetPaths = paths
 
 		client, err := s.dialWorker(ctx, req.GetWorkerPodUid())
 		if err != nil {
@@ -1438,7 +1527,7 @@ func (s *Atelet) Terminate(ctx context.Context, req *ateletpb.TerminateRequest) 
 			ActorUid:              req.GetActorUid(),
 			ActorTemplateAtespace: req.GetActorTemplateAtespace(),
 			ActorTemplateName:     req.GetActorTemplateName(),
-			RunscPath:             runscPathFor(assetPaths),
+			RunscPath:             runscPathFor(paths),
 			Spec:                  spec,
 			ActorDirs:             ateletpath.ActorDirs(actorUID),
 		}); err != nil {

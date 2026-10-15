@@ -94,3 +94,54 @@ func TestValidateAuthenticationConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestJWTProviderConfigPrincipal(t *testing.T) {
+	claims := map[string]any{"sub": "1234567890", "email": "dev@example.com", "email_verified": true}
+	tests := []struct {
+		name    string
+		claim   string
+		claims  map[string]any
+		want    string
+		wantErr bool
+	}{
+		{name: "sub by default", claims: claims, want: "1234567890"},
+		{name: "a chosen claim", claim: "email", claims: claims, want: "dev@example.com"},
+		{name: "a string email_verified", claim: "email", claims: map[string]any{"email": "dev@example.com", "email_verified": "true"}, want: "dev@example.com"},
+		{name: "an unverified email", claim: "email", claims: map[string]any{"email": "dev@example.com", "email_verified": false}, wantErr: true},
+		{name: "no email_verified", claim: "email", claims: map[string]any{"email": "dev@example.com"}, wantErr: true},
+		{name: "a missing claim", claim: "upn", claims: claims, wantErr: true},
+		{name: "a non-string claim", claim: "email_verified", claims: claims, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := JWTProviderConfig{Name: "p", PrincipalClaim: tt.claim}.Principal(tt.claims)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("Principal() = %q, %v; want %q, error %t", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadAuthenticationConfigAcceptsPrincipalClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authentication.yaml")
+	if err := os.WriteFile(path, []byte(`
+actorIdentityJWTProvider: kubernetes
+jwtProviders:
+- name: kubernetes
+  issuer: https://kubernetes.default.svc
+  audiences: [api.ate-system.svc]
+- name: google
+  issuer: https://accounts.google.com
+  audiences: [cloud-sdk-client]
+  principalClaim: email
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadAuthenticationConfig(path)
+	if err != nil {
+		t.Fatalf("LoadAuthenticationConfig() error = %v", err)
+	}
+	if got := cfg.JWTProviders[1].PrincipalClaim; got != "email" {
+		t.Fatalf("PrincipalClaim = %q, want email", got)
+	}
+}

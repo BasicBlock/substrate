@@ -45,9 +45,11 @@ const (
 	phaseWakeupProbe   = "wakeup_probe"
 	phaseActivate      = "activate"
 
-	phaseCheckpoint = "checkpoint"
-	phaseDurableDir = "durable_dir"
-	phaseTeardown   = "teardown"
+	phasePause        = "pause"
+	phaseFsCheckpoint = "fscheckpoint"
+	phaseCheckpoint   = "checkpoint"
+	phaseDurableDir   = "durable_dir"
+	phaseTeardown     = "teardown"
 
 	phaseTotal = ateattr.SnapshotPhaseTotal
 )
@@ -84,14 +86,18 @@ func (t restoreTiming) phases() []phaselog.Phase {
 }
 
 // checkpointTiming is the elapsed time of each CheckpointWorkload phase. A
-// Full scope runs checkpoint; a Data scope runs durable_dir capture instead.
+// MEMORY capture runs pause and fscheckpoint (the root filesystem image beside
+// the memory image) and checkpoint; a VOLUMES one runs durable_dir capture
+// instead.
 type checkpointTiming struct {
-	prep, checkpoint, durableDir, teardown, total time.Duration
+	prep, pause, fsCheckpoint, checkpoint, durableDir, teardown, total time.Duration
 }
 
 func (t checkpointTiming) phases() []phaselog.Phase {
 	return []phaselog.Phase{
 		{Name: phasePrep, D: t.prep},
+		{Name: phasePause, D: t.pause},
+		{Name: phaseFsCheckpoint, D: t.fsCheckpoint},
 		{Name: phaseCheckpoint, D: t.checkpoint},
 		{Name: phaseDurableDir, D: t.durableDir},
 		{Name: phaseTeardown, D: t.teardown},

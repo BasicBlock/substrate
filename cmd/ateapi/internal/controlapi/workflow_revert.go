@@ -56,7 +56,13 @@ func isRevertable(actor *ateapipb.Actor) bool {
 // Idempotent: each step keys on a persisted field rather than on the state the
 // actor was reverted from, so a re-entered workflow fast-forwards to wherever
 // the previous attempt stopped.
-func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error) {
+	ctx = preview.ContextWithOptIn(ctx)
+	return w.revertActor(ctx, actorRef, w.acquireActorLease)
+}
+
+// revertActor is RevertActor under the lease that acquire takes.
+func (w *ActorWorkflow) revertActor(ctx context.Context, actorRef resources.ActorRef, acquire actorLeaseAcquirer) (_ *ateapipb.Actor, err error) {
 	ctx = preview.ContextWithOptIn(ctx)
 	start := time.Now()
 	var actor *ateapipb.Actor
@@ -73,7 +79,7 @@ func (w *ActorWorkflow) RevertActor(ctx context.Context, actorRef resources.Acto
 		w.instruments.recordLifecycleOp(ctx, ateattr.OperationRevert, start, err, attrs...)
 	}()
 
-	leaseCtx, lease, err := w.acquireActorLease(ctx, actorRef)
+	leaseCtx, lease, err := acquire(ctx, actorRef)
 	if err != nil {
 		return nil, err
 	}
