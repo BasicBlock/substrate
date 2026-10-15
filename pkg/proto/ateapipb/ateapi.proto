@@ -62,7 +62,9 @@ service Control {
   // API, and the principal needs can_connect on the actor (editor of its
   // atespace). The gateway asks before it resumes or routes to the actor. It
   // answers without checking that the actor exists.
-  rpc CheckActorAccess(CheckActorAccessRequest) returns (CheckActorAccessResponse) {}
+  rpc CheckActorAccess(CheckActorAccessRequest) returns (CheckActorAccessResponse) {
+    option (method).resource = "Actor";
+  }
 
   // Revert an actor to SUSPENDED state at its durable snapshot.
   // Only crashed, running or paused actors can be reverted.

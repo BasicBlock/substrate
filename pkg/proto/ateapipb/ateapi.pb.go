@@ -9996,7 +9996,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x05Scope\x12\x15\n" +
 	"\x11SCOPE_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSCOPE_ATESPACE\x10\x01\x12\x10\n" +
-	"\fSCOPE_GLOBAL\x10\x022\x94 \n" +
+	"\fSCOPE_GLOBAL\x10\x022\x9f \n" +
 	"\aControl\x12?\n" +
 	"\bGetActor\x12\x17.ateapi.GetActorRequest\x1a\r.ateapi.Actor\"\v\x82\xb5\x18\a\n" +
 	"\x05Actor\x12E\n" +
@@ -10010,8 +10010,9 @@ const file_ateapi_proto_rawDesc = "" +
 	"PauseActor\x12\x19.ateapi.PauseActorRequest\x1a\x1a.ateapi.PauseActorResponse\"\v\x82\xb5\x18\a\n" +
 	"\x05Actor\x12S\n" +
 	"\vResumeActor\x12\x1a.ateapi.ResumeActorRequest\x1a\x1b.ateapi.ResumeActorResponse\"\v\x82\xb5\x18\a\n" +
-	"\x05Actor\x12W\n" +
-	"\x10CheckActorAccess\x12\x1f.ateapi.CheckActorAccessRequest\x1a .ateapi.CheckActorAccessResponse\"\x00\x12S\n" +
+	"\x05Actor\x12b\n" +
+	"\x10CheckActorAccess\x12\x1f.ateapi.CheckActorAccessRequest\x1a .ateapi.CheckActorAccessResponse\"\v\x82\xb5\x18\a\n" +
+	"\x05Actor\x12S\n" +
 	"\vRevertActor\x12\x1a.ateapi.RevertActorRequest\x1a\x1b.ateapi.RevertActorResponse\"\v\x82\xb5\x18\a\n" +
 	"\x05Actor\x12E\n" +
 	"\vDeleteActor\x12\x1a.ateapi.DeleteActorRequest\x1a\r.ateapi.Actor\"\v\x82\xb5\x18\a\n" +
