@@ -1753,9 +1753,9 @@ func TestWorkerPodDeletion(t *testing.T) {
 		t.Fatalf("worker for pod %s/%s was not found in ListWorkers response: %v", podNamespace, podName, workersResp.GetWorkers())
 	}
 
-	// Delete the worker pod
+	// Abruptly lose the worker pod, bypassing the graceful suspend-on-drain path.
 	t.Logf("Deleting worker pod %s/%s...", podNamespace, podName)
-	err = clients.K8s.CoreV1().Pods(podNamespace).Delete(ctx, podName, metav1.DeleteOptions{})
+	err = clients.K8s.CoreV1().Pods(podNamespace).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
 	if err != nil {
 		t.Fatalf("failed to delete pod %s/%s: %v", podNamespace, podName, err)
 	}
@@ -1879,10 +1879,10 @@ func TestRevertCrashedActor(t *testing.T) {
 		t.Fatalf("running actor has no pod recorded: %v", actor.GetStatus().GetWorkerAssignment())
 	}
 
-	// Deleting the pod is how a real crash happens: releaseBoundActor marks the
+	// Abrupt pod loss bypasses graceful suspension: releaseBoundActor marks the
 	// actor CRASHED and clears its assignment while keeping AssignedNode so
 	// revert can still clean up the node.
-	if err := clients.K8s.CoreV1().Pods(podNamespace).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
+	if err := clients.K8s.CoreV1().Pods(podNamespace).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: new(int64)}); err != nil {
 		t.Fatalf("failed to delete worker pod %s/%s: %v", podNamespace, podName, err)
 	}
 	waitForActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_CRASHED)

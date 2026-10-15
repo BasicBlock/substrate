@@ -218,7 +218,9 @@ func TestSyncer_Lifecycle(t *testing.T) {
 		t.Fatalf("update pod: %v", err)
 	}
 
-	got := waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool { return w != nil })
+	got := waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool {
+		return w != nil && w.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE
+	})
 	if want := []string{"127.0.0.1"}; !slices.Equal(got.GetIps(), want) {
 		t.Errorf("worker ips = %q, want %q", got.GetIps(), want)
 	}
