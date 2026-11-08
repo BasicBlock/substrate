@@ -16,6 +16,7 @@ package suspend
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"slices"
@@ -237,5 +238,66 @@ func TestNewRequesterFailsOnBadCredentials(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewRequester() with unreadable credentials succeeded, want an error the caller can exit on")
+	}
+}
+
+type drainRequester struct {
+	started chan Actor
+	release chan struct{}
+	failure error
+}
+
+func (r *drainRequester) RequestSuspend(ctx context.Context, actor Actor) error {
+	select {
+	case r.started <- actor:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-r.release:
+		if actor.Name == "two" {
+			return r.failure
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func TestDrainWaitsForEveryDurabilityResponse(t *testing.T) {
+	expected := errors.New("second actor upload failed")
+	requester := &drainRequester{started: make(chan Actor, 2), release: make(chan struct{}), failure: expected}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	actors := []Actor{{Atespace: "team", Name: "one", UID: "uid-one"}, {Atespace: "team", Name: "two", UID: "uid-two"}}
+	go func() { result <- OnDrain(ctx, requester, actors) }()
+	received := map[string]string{}
+	for range actors {
+		select {
+		case actor := <-requester.started:
+			received[actor.Name] = actor.UID
+		case <-ctx.Done():
+			t.Fatal("drain did not request every hosted actor")
+		}
+	}
+	if received["one"] != "uid-one" || received["two"] != "uid-two" {
+		t.Fatalf("wrong actors requested: %v", received)
+	}
+	close(requester.release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, expected) {
+			t.Fatalf("drain did not wait for the remote upload result: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("drain did not finish")
+	}
+}
+func TestDrainRespectsTheSharedDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	requester := &drainRequester{started: make(chan Actor, 1), release: make(chan struct{})}
+	if err := OnDrain(ctx, requester, []Actor{{Atespace: "team", Name: "one", UID: "uid"}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("drain = %v, want canceled", err)
 	}
 }

@@ -700,24 +700,11 @@ created without a snapshot boots from its template's images.
 ### Eviction
 A worker pod can go away while it hosts running actors: when its `WorkerPool` rolls to a new worker image or pod template, as in an [upgrade](../guides/upgrade.md), or scales down, when its node is drained, or when its Spot VM is reclaimed.
 
-When the pod gets `SIGTERM`, its worker stops accepting actors and sends `SIGTERM` to the main process of each container of every actor it hosts. Each actor then has 30 minutes, counted from the pod's `SIGTERM`, to be suspended. The 30 minutes is the worker's shutdown budget, fixed in ateworker and kept shorter than the pod's one-hour termination grace period so that the worker, not the kubelet, kills what is left. An actor suspended in that window keeps its state and resumes on another worker like any suspended actor.
+When the pod gets `SIGTERM`, its worker stops accepting actors and asks the control plane to suspend the actors it hosts. Both gVisor and microVM workers use the authenticated node-local WorkerSupport protocol. These requests hold no actor lifecycle lock, so the checkpoint can call back into the worker. A fresh synchronous suspend uploads its snapshot before answering.
 
-Substrate does not suspend the actor for you. Whatever drives the actor, usually its harness, has to call `SuspendActor` with `DURABILITY_MODE_SYNCHRONOUS` (`kubectl ate suspend actor --mode=sync`) before those 30 minutes are up. An asynchronous suspend can lose the snapshot if the node goes away:
+Requests and any fallback share the worker's 30-minute shutdown budget. If a request fails or that budget expires, the worker sends `SIGTERM` to the remaining workloads and eventually kills them. A force kill, missing worker registration, or node loss can still crash an actor and lose work since its last snapshot. `RevertActor` (`kubectl ate revert`) returns a crashed actor to its last external snapshot.
 
-- It returns once the snapshot is on the node.
-- atelet schedules the upload to object storage about `--snapshot-upload-delay` (5 minutes by default) after the snapshot is taken. Neither when the upload starts nor when it finishes is promised.
-- Until atelet detaches the actor, `--snapshot-detach-delay` (30 minutes by default, unrelated to the worker's 30 minutes), the actor stays pinned to the node and resumes there.
-- If the node goes away before the upload completes, the snapshot goes with it.
-
-Only the actor gets the `SIGTERM`, so it has to pass that on, for example on an endpoint the harness polls.
-
-Every actor that must keep its state through an eviction needs a `SIGTERM` handler that:
-
-- **does not exit.** A process that has exited cannot be suspended.
-- **runs in the container's main process.** Substrate signals only to the main process.
-- **gets the actor suspended within the 30 minutes.**
-
-An actor still running when the 30 minutes are up is killed. Once the pod is gone, the actor moves to `ACTOR_STATE_CRASHED`, and everything since its last snapshot is lost. `RevertActor` (`kubectl ate revert`) returns a crashed actor to `ACTOR_STATE_SUSPENDED` at its last external snapshot.
+An actor already suspended asynchronously may still have a PENDING upload, and another suspend does not promote it. Before replacing atelet or a node, check that every retained snapshot is COMPLETED and detach actors with pending local copies. Worker shutdown alone does not establish that all node-local state is durable.
 
 The node can cut the 30 minutes short. GKE node upgrades and cluster autoscaler scale-downs wait up to an hour for a pod, so they leave the full 30 minutes. A reclaimed GKE [Spot VM](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/spot-vms) gives pods 15 seconds by default and at most 2 minutes, so an actor there has to be suspended in that time or it crashes.
 
@@ -727,7 +714,7 @@ The node can cut the 30 minutes short. GKE node upgrades and cluster autoscaler 
 *   **Startup Logic:** Place expensive initialization (loading large models, establishing baseline connections) in your application's entry point. When golden snapshots are enabled, this initialization can be captured in the Golden Snapshot. Actors that cold-boot run initialization again.
 *   **Placement:** The `WorkerPool` sets the sandbox class (`sandboxClasses[].name`). Use the template's `workerSelector` to target the pools whose class your workload needs (see [Sandbox Classes](sandbox-classes.md)). Pool selection matches pool labels only. A pool's namespace and RBAC do not limit which templates can select it. Without a selector an actor may run on any pool.
 *   **Version Management:** When updating code, create a new `ActorTemplate` (e.g. `v2`). Substrate treats each template as an immutable state root. Suspended actors can be repointed to the new template via `UpdateActor` (`kubectl ate update actor --template`).
-*   **Eviction:** Give every actor a `SIGTERM` handler that does not exit, and have the actor suspended within 30 minutes of it. See [Eviction](#eviction).
+*   **Eviction:** Workers request synchronous suspension before stopping workloads. Verify completed snapshots before replacing a node; abrupt loss still needs recovery. See [Eviction](#eviction).
 
 ---
 

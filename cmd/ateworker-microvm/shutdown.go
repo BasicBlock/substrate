@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
+	"go.ate.dev/substrate/internal/ateworker/suspend"
 )
 
 // workloadGracePeriod is the whole budget for draining the worker on shutdown:
@@ -79,6 +80,16 @@ func (s *AteWorkerService) gracefulShutdown(ctx context.Context) {
 	// leaves the workloads only the remainder, and the total stays bounded by
 	// workloadGracePeriod however the time falls between them.
 	deadline := time.Now().Add(workloadGracePeriod)
+
+	drainCtx, drainCancel := context.WithDeadline(ctx, deadline)
+	defer drainCancel()
+	var actors []suspend.Actor
+	for _, hosted := range s.hostedActors() {
+		actors = append(actors, suspend.Actor{Atespace: hosted.attribution.Ref.Atespace, Name: hosted.attribution.Ref.Name, UID: hosted.attribution.UID})
+	}
+	if err := suspend.OnDrain(drainCtx, s.suspendRequester, actors); err != nil {
+		slog.WarnContext(ctx, "Checkpoint request failed during drain; stopping remaining workloads", slog.Any("err", err))
+	}
 
 	// Let checkpoints finish saving state before stopping guests.
 	waitCtx, waitCancel := context.WithDeadline(ctx, deadline)

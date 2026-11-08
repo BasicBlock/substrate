@@ -27,17 +27,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestGracefulWorkerTermination exercises the propagated-SIGTERM eviction flow
-// end to end: an actor is scheduled onto a worker pod, that pod is deleted
-// (simulating a Kubernetes eviction), and the control plane is expected to mark
-// the worker DRAINING, then remove it and detach the actor once the pod is gone.
-//
-// The demo counter actor installs a SIGTERM handler that sleeps
-// before exiting, simulating a real-world workload that waits for graceful
-// termination. The actor eventually lands in a terminal, non-RUNNING state
-// (CRASHED). We assert the control-plane state
-// machine rather than any in-actor state saving, which is the application's responsibility.
-func TestGracefulWorkerTermination(t *testing.T) {
+// TestLostWorkerRegistrationCrashesActor models abrupt loss by removing the
+// registration before its pod can ask for a graceful checkpoint.
+func TestLostWorkerRegistrationCrashesActor(t *testing.T) {
 	t.Parallel()
 	nsObj := e2e.CreateNamespace(t)
 
@@ -49,7 +41,7 @@ func TestGracefulWorkerTermination(t *testing.T) {
 		t.Fatalf("failed to initialize ActorTemplate: %v", err)
 	}
 
-	actorID := "graceful-term-" + nsObj.Name
+	actorID := "lost-worker-" + nsObj.Name
 	if _, err := clients.SubstrateAPI.CreateActor(ctx, &ateapi.CreateActorRequest{
 		Actor: &ateapi.Actor{
 			Metadata:      &ateapi.ResourceMetadata{Atespace: demoAtespace, Name: actorID},
@@ -90,11 +82,11 @@ func TestGracefulWorkerTermination(t *testing.T) {
 	}
 	t.Logf("Actor %q bound to worker pod %s/%s", actorID, podNS, podName)
 
-	// Evict the worker pod. The kubelet sends SIGTERM to worker, which propagates
-	// it into the sandbox; the control plane marks the worker DRAINING on the
-	// DeletionTimestamp watch event and cleans up when the pod is finally gone.
-	if err := clients.K8s.CoreV1().Pods(podNS).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("failed to delete worker pod %s/%s: %v", podNS, podName, err)
+	if _, err := clients.SubstrateAPI.DeleteWorker(ctx, &ateapi.DeleteWorkerRequest{Worker: running.GetStatus().GetWorkerAssignment().GetWorker()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clients.K8s.CoreV1().Pods(podNS).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: new(int64)}); err != nil {
+		t.Fatal(err)
 	}
 
 	// The worker record must eventually be removed once the pod is gone.
@@ -142,10 +134,8 @@ func waitForWorkerRemoved(ctx context.Context, t *testing.T, clients *e2e.Client
 	}
 }
 
-// TestGracefulWorkerTerminationSuspend exercises the case where a worker pod is
-// deleted (evicted), and while the container is in its SIGTERM shutdown phase,
-// we initiate a suspend. Suspend either completes before worker deletion crashes
-// the actor, or reports that concurrent crash without overwriting it.
+// TestGracefulWorkerTerminationSuspend races a client suspend with worker
+// drain. Whichever request wins the lease must leave a saved actor.
 func TestGracefulWorkerTerminationSuspend(t *testing.T) {
 	t.Parallel()
 	nsObj := e2e.CreateNamespace(t)
@@ -209,9 +199,6 @@ func TestGracefulWorkerTerminationSuspend(t *testing.T) {
 		t.Fatalf("failed to delete worker pod %s/%s: %v", podNS, podName, err)
 	}
 
-	// Wait 2 seconds to make sure the SIGTERM was sent and the container is in its sleep phase.
-	time.Sleep(2 * time.Second)
-
 	// Suspend the actor.
 	t.Logf("Suspending actor %q during termination", actorID)
 	_, suspendErr := clients.SubstrateAPI.SuspendActor(ctx, &ateapi.SuspendActorRequest{
@@ -221,12 +208,8 @@ func TestGracefulWorkerTerminationSuspend(t *testing.T) {
 	wantState := ateapi.ActorState_ACTOR_STATE_SUSPENDED
 	switch status.Code(suspendErr) {
 	case codes.OK:
-	case codes.FailedPrecondition, codes.Aborted:
-		// Worker deletion can crash the actor before finalize reads it, or
-		// after that read but before its version-guarded update. Both must
-		// preserve the crash and report failure instead of returning success.
-		wantState = ateapi.ActorState_ACTOR_STATE_CRASHED
-		t.Logf("Suspend reported concurrent worker deletion: %v", suspendErr)
+	case codes.Aborted:
+		t.Logf("Worker suspend won the actor lease: %v", suspendErr)
 	default:
 		t.Fatalf("failed to suspend Actor: %v", suspendErr)
 	}
@@ -260,4 +243,121 @@ func TestGracefulWorkerTerminationSuspend(t *testing.T) {
 	if wantState == ateapi.ActorState_ACTOR_STATE_SUSPENDED && actor.GetStatus().GetCrash() != nil {
 		t.Errorf("successful suspend retained a crash record: %v", actor.GetStatus().GetCrash())
 	}
+}
+
+// TestGracefulWorkerTermination preserves memory and files through eviction.
+func TestGracefulWorkerTermination(t *testing.T) {
+	t.Parallel()
+	nsObj := e2e.CreateNamespace(t)
+
+	ctx := context.Background()
+	clients := e2e.GetClients()
+
+	at, err := createActorTemplate(ctx, t, clients, nsObj, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	if err != nil {
+		t.Fatalf("failed to initialize ActorTemplate: %v", err)
+	}
+
+	actorID := "graceful-term-" + nsObj.Name
+	if _, err := clients.SubstrateAPI.CreateActor(ctx, &ateapi.CreateActorRequest{
+		Actor: &ateapi.Actor{
+			Metadata:      &ateapi.ResourceMetadata{Atespace: demoAtespace, Name: actorID},
+			ActorTemplate: e2e.TemplateRef(at),
+		},
+	}); err != nil {
+		t.Fatalf("failed to create Actor: %v", err)
+	}
+	defer func() {
+		_, _ = clients.SubstrateAPI.DeleteActor(ctx, &ateapi.DeleteActorRequest{
+			Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID},
+		})
+	}()
+
+	// Bring the actor up on a worker so it is bound to a pod.
+	if _, err := e2e.ResumeActorAwaitCapacity(t, ctx, clients, &ateapi.ResumeActorRequest{
+		Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID},
+	}); err != nil {
+		t.Fatalf("failed to resume Actor: %v", err)
+	}
+	waitForActorState(ctx, t, clients, actorID, ateapi.ActorState_ACTOR_STATE_RUNNING)
+
+	// Set the sigterm sleep interval to 15 seconds.
+	if _, err := callActorPath(t, resources.ActorRef{Atespace: demoAtespace, Name: actorID}, "GET", "/set-sigterm-sleep?duration=15"); err != nil {
+		t.Fatalf("failed to set sigterm sleep: %v", err)
+	}
+
+	before, err := callActor(t, resources.ActorRef{Atespace: demoAtespace, Name: actorID})
+	if err != nil {
+		t.Fatalf("counter before eviction: %v", err)
+	}
+	validateCounterResponse(t, before, "before eviction", 1, 1)
+
+	running, err := clients.SubstrateAPI.GetActor(ctx, &ateapi.GetActorRequest{
+		Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID},
+	})
+	if err != nil {
+		t.Fatalf("failed to get running Actor: %v", err)
+	}
+	podNS := running.GetStatus().GetWorkerAssignment().GetWorkerNamespace()
+	podName := running.GetStatus().GetWorkerAssignment().GetWorkerPod()
+	if podNS == "" || podName == "" {
+		t.Fatalf("running actor has no bound worker pod: ns=%q name=%q", podNS, podName)
+	}
+	t.Logf("Actor %q bound to worker pod %s/%s", actorID, podNS, podName)
+
+	// The worker requests its own checkpoint before exiting.
+	if err := clients.K8s.CoreV1().Pods(podNS).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("failed to delete worker pod %s/%s: %v", podNS, podName, err)
+	}
+
+	// The worker record must eventually be removed once the pod is gone.
+	if err := waitForWorkerRemoved(ctx, t, clients, podName, 60*time.Second); err != nil {
+		t.Fatalf("worker %s not removed after pod deletion: %v", podName, err)
+	}
+
+	// The actor is safely suspended rather than crashed.
+	waitForActorState(ctx, t, clients, actorID, ateapi.ActorState_ACTOR_STATE_SUSPENDED)
+
+	// Verify the pod assignment was cleared.
+	actor, err := clients.SubstrateAPI.GetActor(ctx, &ateapi.GetActorRequest{
+		Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID},
+	})
+	if err != nil {
+		t.Fatalf("failed to get actor: %v", err)
+	}
+	latest := actor.GetStatus().GetLastAssignedGeneration()
+	if latest <= running.GetStatus().GetLastAssignedGeneration() {
+		t.Fatal("eviction did not capture a new snapshot")
+	}
+	completed := false
+	for _, snap := range actor.GetStatus().GetSnapshots() {
+		if snap.GetGeneration() == latest && snap.GetDurableSnapshot().GetState() == ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED {
+			completed = true
+		}
+	}
+	if !completed {
+		t.Fatal("new eviction snapshot is not durable")
+	}
+	if pod := actor.GetStatus().GetWorkerAssignment().GetWorkerPod(); pod != "" {
+		t.Errorf("actor still bound to worker pod %q, expected empty", pod)
+	}
+	if _, err := e2e.ResumeActorAwaitCapacity(t, ctx, clients, &ateapi.ResumeActorRequest{Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID}}); err != nil {
+		t.Fatalf("resume after eviction: %v", err)
+	}
+	resumed, err := clients.SubstrateAPI.GetActor(ctx, &ateapi.GetActorRequest{Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID}})
+	if err != nil {
+		t.Fatalf("get resumed actor: %v", err)
+	}
+	if resumed.GetStatus().GetWorkerAssignment().GetWorkerPod() == podName {
+		t.Fatal("actor resumed on the deleted worker")
+	}
+	after, err := callActor(t, resources.ActorRef{Atespace: demoAtespace, Name: actorID})
+	if err != nil {
+		t.Fatalf("counter after eviction: %v", err)
+	}
+	validateCounterResponse(t, after, "after eviction", 2, 2)
+	if _, err := clients.SubstrateAPI.SuspendActor(ctx, &ateapi.SuspendActorRequest{Actor: &ateapi.ObjectRef{Atespace: demoAtespace, Name: actorID}}); err != nil {
+		t.Fatalf("final suspend: %v", err)
+	}
+
 }

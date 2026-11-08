@@ -51,7 +51,7 @@ kubectl get deploy -A -l ate.dev/worker-pool -o custom-columns='NAMESPACE:.metad
 
 ## Before you start
 
-You need git, go and kubectl, and crane for prebuilt images. Agree on a time with actor owners: their running actors get `SIGTERM` in step 3.
+You need git, go and kubectl, and crane for prebuilt images. Agree on maintenance time with actor owners: workers request checkpoints in step 3, with a bounded fallback if a request fails.
 
 Every `ate-setup deploy` run records the settings it was given in `installs/` under the record directory: `ATE_RECORD_DIR` if set, by default `~/.cache/ate-setup` on Linux and `~/Library/Caches/ate-setup` on macOS. It prints the path as `recorded this configuration in <path>`.
 
@@ -178,7 +178,7 @@ What to expect:
 - **Done:** Step 3 is done when every pool is done rolling with `kubectl get deploy -A -l ate.dev/worker-pool`. Go to Step 4 once done.
 - **Pace:** a WorkerPool replaces 10% of its workers per batch, rounded down, at least one. With spare capacity, every batch has its `SIGTERM` within minutes and the old workers drain in parallel. Without it, each batch waits up to 30 minutes for old workers to exit.
 - **Stuck:** rollout status fails with `exceeded its progress deadline` (the roll goes on), or a worker pod stays Terminating for more than 60 minutes, its grace period (a worker normally exits within about 30). Check `kubectl -n $NS get pods -l ate.dev/worker-pool=$WORKERPOOL`. A bad image stops the roll after the first batch: [roll back that pool](#roll-back-step-3).
-- **Actors:** each gets `SIGTERM` and 30 minutes to be suspended. Substrate does not suspend them. An actor that is not suspended by then becomes `CRASHED` and loses its work since its last snapshot. [Eviction](../reference/api-guide.md#eviction) in the API guide says what an actor needs to keep its state.
+- **Actors:** workers request synchronous suspension before sending `SIGTERM` to remaining workloads. Requests and fallback share a 30-minute budget. Verify every retained snapshot is COMPLETED before replacing atelet or nodes; a concurrent asynchronous suspend may still be uploading. See [Eviction](../reference/api-guide.md#eviction).
 
 ### Step 4. Upgrade the Substrate control plane
 

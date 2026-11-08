@@ -17,11 +17,15 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 
+	"go.ate.dev/substrate/internal/actorlock"
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/ateworker/suspend"
 	"go.ate.dev/substrate/internal/resources"
 )
 
@@ -46,5 +50,41 @@ func TestAdmitActorKeepsAHostedActorsSlot(t *testing.T) {
 	}
 	if got := len(s.hostedActors()); got != 1 {
 		t.Errorf("hosting %d actors, want 1", got)
+	}
+}
+
+type shutdownRequester struct {
+	service   *AteWorkerService
+	requested chan suspend.Actor
+}
+
+func (r *shutdownRequester) RequestSuspend(_ context.Context, actor suspend.Actor) error {
+	r.service.actorsMu.Lock()
+	delete(r.service.actors, actor.UID)
+	r.service.actorsMu.Unlock()
+	r.requested <- actor
+	return nil
+}
+func TestWorkerDrainRequestsItsHostedActorBeforeExit(t *testing.T) {
+	actor := suspend.Actor{Atespace: "team", Name: "workspace", UID: "drain-actor-uid"}
+	service := &AteWorkerService{actors: map[string]*hostedActor{actor.UID: {attribution: resources.ActorAttribution{Ref: resources.ActorRef{Atespace: actor.Atespace, Name: actor.Name}, UID: actor.UID}}}, inFlight: actorlock.NewInFlight()}
+	requester := &shutdownRequester{service: service, requested: make(chan suspend.Actor, 1)}
+	service.suspendRequester = requester
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { service.gracefulShutdown(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("shutdown blocked the checkpoint callback")
+	}
+	select {
+	case got := <-requester.requested:
+		if got != actor {
+			t.Fatalf("requested %v,want %v", got, actor)
+		}
+	default:
+		t.Fatal("worker exited without asking to save its hosted actor")
 	}
 }
