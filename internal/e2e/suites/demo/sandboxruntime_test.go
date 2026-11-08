@@ -221,6 +221,34 @@ type sandboxRuntimeFixture struct {
 	v1Hash    string
 }
 
+// TestSupplementalAssetRemovalRestoresRootFS keeps runsc identical while its
+// bundle fingerprint changes. The actor must cold-boot with its rootfs and
+// durable data, then save a MEMORY snapshot under the canonical bundle.
+func TestSupplementalAssetRemovalRestoresRootFS(t *testing.T) {
+	if e2e.IsMicroVM() {
+		t.Skip("gVisor binary compatibility proof")
+	}
+	t.Parallel()
+	f := setupSuspendedV1Actor(t, "asset-proof", func(version *atev1.SandboxVersionConfig) {
+		for arch := range version.Assets {
+			version.Assets[arch]["rootfs-proof"] = atev1.AssetFile{
+				URL:    "gs://gvisor/releases/release/20261102.0/x86_64/gvisor.tar.zstd.sha512",
+				SHA256: "b7e31f911aef135e7df393105473cf947c1cfcb267655ab05f22acdd6ff669e5",
+			}
+		}
+	})
+	canonical := *f.v1.DeepCopy()
+	canonical.Name = "canonical"
+	for arch := range canonical.Assets {
+		delete(canonical.Assets[arch], "rootfs-proof")
+	}
+	f.updateVersions(t, canonical.Name, []atev1.SandboxVersionConfig{withState(f.v1, atev1.SandboxVersionStateDisabled), canonical})
+	worker := f.waitForWorker(t, func(status *ateapi.WorkerStatus) bool {
+		return runtimeAttribute(hardware.ColdBootRuntime(status), hardware.AttrSandboxBundleHash) != f.v1Hash && !hardware.WorkerMatches(status, f.v1Runtime)
+	})
+	f.resumeAndCheck(t, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, hardware.ColdBootRuntime(worker))
+}
+
 // setupSuspendedV1Actor creates a SandboxConfig holding one version, v1,
 // copied from the cluster's class default, a one-worker pool pinned to it, a
 // counter ActorTemplate without a golden snapshot, and an actor. It runs the
@@ -228,7 +256,7 @@ type sandboxRuntimeFixture struct {
 // (memory=2, file=2, rootfs=2), suspends it synchronously, and checks the
 // MEMORY snapshot is stamped with v1. f.v2 is a second version with a
 // different sandbox_bundle_hash that the config does not hold yet.
-func setupSuspendedV1Actor(t *testing.T, prefix string) *sandboxRuntimeFixture {
+func setupSuspendedV1Actor(t *testing.T, prefix string, configure ...func(*atev1.SandboxVersionConfig)) *sandboxRuntimeFixture {
 	t.Helper()
 	nsObj := e2e.CreateNamespace(t)
 	ctx := context.Background()
@@ -240,6 +268,9 @@ func setupSuspendedV1Actor(t *testing.T, prefix string) *sandboxRuntimeFixture {
 	}
 	baseConfig := newestClassDefault(t, ctx, clients, class)
 	v1 := defaultVersionFromConfig(t, baseConfig, "v1")
+	for _, apply := range configure {
+		apply(&v1)
+	}
 	v2 := secondSandboxVersion(v1, "v2", class)
 
 	configName := "e2e-" + prefix + "-" + nsObj.Name
