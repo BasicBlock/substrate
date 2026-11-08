@@ -16,6 +16,7 @@
 package oidcjwt
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -104,6 +105,8 @@ type Claims struct {
 
 	KubernetesClaims
 	SubstrateClaims
+	// Raw contains the verified payload for principal claim selection.
+	Raw map[string]any
 }
 
 // SubstrateClaims are the claims the actor-id JWT issuer adds to the tokens it
@@ -341,7 +344,15 @@ func (v *Verifier) Verify(ctx context.Context, jwt string, now time.Time) (*Clai
 		}
 	}
 
+	raw := map[string]any{}
+	decoder := json.NewDecoder(bytes.NewReader(payloadBytes))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("while decoding payload claims: %w", err)
+	}
+
 	return &Claims{
+		Raw:             raw,
 		Issuer:          rawClaims.Issuer,
 		Audiences:       audiences,
 		Subject:         rawClaims.Subject,

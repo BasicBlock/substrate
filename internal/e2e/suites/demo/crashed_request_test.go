@@ -83,7 +83,10 @@ func TestRoutedRequestToCrashedActorFailsFast(t *testing.T) {
 		t.Fatalf("running actor has no pod recorded: %v", actor.GetStatus().GetWorkerAssignment())
 	}
 
-	// Deleting the pod is how a real crash happens, as in TestRevertCrashedActor.
+	// Lose the worker registration before the pod can drain.
+	if _, err := clients.SubstrateAPI.DeleteWorker(ctx, &ateapi.DeleteWorkerRequest{Worker: actor.GetStatus().GetWorkerAssignment().GetWorker()}); err != nil {
+		t.Fatal(err)
+	}
 	if err := clients.K8s.CoreV1().Pods(podNamespace).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("failed to delete worker pod %s/%s: %v", podNamespace, podName, err)
 	}

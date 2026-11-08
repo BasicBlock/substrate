@@ -22,6 +22,12 @@ that principal may do.
   `sub`.
 - A call with no certificate and no valid token gets `Unauthenticated`.
 
+A provider can set `principalClaim: email` to identify callers by verified
+email address instead of `sub`. Tokens must carry a nonempty string `email`
+and `email_verified` set to boolean `true` or string `"true"`. This is used by BasicBlock's Google provider,
+whose access policies name people by address. Other claims must be nonempty
+strings; omitting `principalClaim` keeps the upstream `sub` behavior.
+
 ## Which credential to use
 
 | Caller | Credential | Principal |

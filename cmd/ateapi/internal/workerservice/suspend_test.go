@@ -87,7 +87,8 @@ func TestRequestActorSuspend(t *testing.T) {
 		t.Fatalf("RequestActorSuspend() failed: %v", err)
 	}
 	want := []*ateapi.SuspendActorRequest{{
-		Actor: &ateapi.ObjectRef{Atespace: suspendAtespace, Name: suspendActor},
+		Actor:   &ateapi.ObjectRef{Atespace: suspendAtespace, Name: suspendActor},
+		Options: &ateapi.SuspendOptions{Mode: ateapi.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
 	}}
 	if diff := cmp.Diff(want, control.calls, protocmp.Transform()); diff != "" {
 		t.Errorf("suspend calls mismatch (-want +got):\n%s", diff)

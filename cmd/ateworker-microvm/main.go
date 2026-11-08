@@ -48,6 +48,7 @@ import (
 	"go.ate.dev/substrate/internal/ateworker/memborrow"
 	"go.ate.dev/substrate/internal/ateworker/pid1"
 	"go.ate.dev/substrate/internal/ateworker/register"
+	"go.ate.dev/substrate/internal/ateworker/suspend"
 	"go.ate.dev/substrate/internal/atunnel"
 	"go.ate.dev/substrate/internal/bootid"
 	"go.ate.dev/substrate/internal/nodepath"
@@ -238,7 +239,16 @@ func do(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ateworkerService := NewService(*podUID, *chBinary, *guestDebug, *maxActors, tunnel, actorLogger, bootID)
+	requester, err := suspend.NewRequester(suspend.Config{
+		SocketPath:           nodepath.WorkerSupportSocket,
+		CredentialBundlePath: tunnelConfig.CredentialBundle,
+		TrustBundlePath:      tunnelConfig.TrustBundle,
+		AteletSPIFFEID:       tunnelConfig.BrokerIdentity,
+	})
+	if err != nil {
+		return err
+	}
+	ateworkerService := NewService(*podUID, *chBinary, *guestDebug, *maxActors, tunnel, actorLogger, bootID, requester)
 	ateworkerService.throttleMemory = cgroup.PSIEnabled(cgroup.Root)
 	if !ateworkerService.throttleMemory {
 		slog.WarnContext(ctx, "Kernel has no cgroup memory pressure (PSI), so actor cgroups get no memory limit and an actor over its booking can restart the worker")
@@ -360,6 +370,8 @@ const (
 
 // AteWorkerService is the cloud-hypervisor implementation of ateworkerpb.WorkerServer.
 type AteWorkerService struct {
+	suspendRequester suspend.ActorRequester
+
 	ateworkerpb.UnimplementedWorkerServer
 
 	// Serializes lifecycle RPCs per actor.
@@ -420,20 +432,21 @@ type AteWorkerService struct {
 var _ ateworkerpb.WorkerServer = (*AteWorkerService)(nil)
 
 // NewService creates a new AteWorkerService.
-func NewService(podUID, chBinary string, guestDebug bool, maxActors int, tunnel *atunnel.Tunnel, actorLogger *actorlog.ActorLogger, bootID string) *AteWorkerService {
+func NewService(podUID, chBinary string, guestDebug bool, maxActors int, tunnel *atunnel.Tunnel, actorLogger *actorlog.ActorLogger, bootID string, requester suspend.ActorRequester) *AteWorkerService {
 	s := &AteWorkerService{
-		locks:          actorlock.New(),
-		inFlight:       actorlock.NewInFlight(),
-		actors:         map[string]*hostedActor{},
-		guestSlots:     make(chan struct{}, statsFanOut),
-		maxActors:      maxActors,
-		podUID:         podUID,
-		chBinary:       chBinary,
-		guestDebug:     guestDebug,
-		snapshotWrites: make(chan struct{}, snapshotWriteSlots),
-		tunnel:         tunnel,
-		actorLogger:    actorLogger,
-		bootID:         bootID,
+		suspendRequester: requester,
+		locks:            actorlock.New(),
+		inFlight:         actorlock.NewInFlight(),
+		actors:           map[string]*hostedActor{},
+		guestSlots:       make(chan struct{}, statsFanOut),
+		maxActors:        maxActors,
+		podUID:           podUID,
+		chBinary:         chBinary,
+		guestDebug:       guestDebug,
+		snapshotWrites:   make(chan struct{}, snapshotWriteSlots),
+		tunnel:           tunnel,
+		actorLogger:      actorLogger,
+		bootID:           bootID,
 	}
 	s.borrow = &memborrow.Ledger{Unbooked: s.unbookedMemory}
 	return s

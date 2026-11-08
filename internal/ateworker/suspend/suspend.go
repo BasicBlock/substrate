@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -40,7 +41,7 @@ import (
 // requestTimeout bounds one attempt. It is generous because the control plane
 // answers only once the suspend it decided to run has finished, which includes
 // checkpointing the actor and uploading its snapshot.
-const requestTimeout = 5 * time.Minute
+const requestTimeout = 30 * time.Minute
 
 // How long a request keeps trying to reach a control plane that is only
 // momentarily out of reach: about fifteen seconds over six attempts.
@@ -174,7 +175,7 @@ func requestWithRetry(ctx context.Context, conn grpc.ClientConnInterface, actor 
 // or misconfiguration that another attempt only repeats. DeadlineExceeded is
 // deliberately not retried either: an attempt reaches it only by outliving
 // requestTimeout, which means the suspend itself is slow rather than
-// undelivered, and re-sending would multiply a five-minute wait.
+// undelivered, and re-sending would lengthen an already slow suspend.
 func retryable(err error) bool {
 	switch status.Code(err) {
 	case codes.Unavailable, codes.Aborted, codes.ResourceExhausted:
@@ -194,4 +195,31 @@ func requestOnce(ctx context.Context, conn grpc.ClientConnInterface, actor Actor
 		ActorUid:      actor.UID,
 	})
 	return err
+}
+
+// ActorRequester is the node-local suspend protocol used during worker drain.
+type ActorRequester interface {
+	RequestSuspend(context.Context, Actor) error
+}
+
+// OnDrain waits for every remote suspend response before the worker exits.
+// Callers must hold no actor locks: each request checkpoints back into them.
+func OnDrain(ctx context.Context, requester ActorRequester, actors []Actor) error {
+	if len(actors) == 0 {
+		return nil
+	}
+	if requester == nil {
+		return fmt.Errorf("worker has no suspend requester")
+	}
+	var group errgroup.Group
+	group.SetLimit(8)
+	for _, actor := range actors {
+		group.Go(func() error {
+			if err := requester.RequestSuspend(ctx, actor); err != nil {
+				return fmt.Errorf("suspending %s/%s while draining: %w", actor.Atespace, actor.Name, err)
+			}
+			return nil
+		})
+	}
+	return group.Wait()
 }

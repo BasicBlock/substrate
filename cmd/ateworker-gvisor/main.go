@@ -48,6 +48,7 @@ import (
 	"go.ate.dev/substrate/internal/ateworker/phaselog"
 	"go.ate.dev/substrate/internal/ateworker/pid1"
 	"go.ate.dev/substrate/internal/ateworker/register"
+	"go.ate.dev/substrate/internal/ateworker/suspend"
 	"go.ate.dev/substrate/internal/ateworkervalidation"
 	"go.ate.dev/substrate/internal/atunnel"
 	"go.ate.dev/substrate/internal/bootid"
@@ -267,7 +268,16 @@ func do(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ateworkerService := NewService(tunnel, actorLogger, *maxActors, flags, bootID)
+	requester, err := suspend.NewRequester(suspend.Config{
+		SocketPath:           nodepath.WorkerSupportSocket,
+		CredentialBundlePath: tunnelConfig.CredentialBundle,
+		TrustBundlePath:      tunnelConfig.TrustBundle,
+		AteletSPIFFEID:       tunnelConfig.BrokerIdentity,
+	})
+	if err != nil {
+		return err
+	}
+	ateworkerService := NewService(tunnel, actorLogger, *maxActors, flags, bootID, requester)
 	ateworkerService.throttleMemory = cgroup.PSIEnabled(defaultCgroupRoot)
 	if !ateworkerService.throttleMemory {
 		slog.WarnContext(ctx, "Kernel has no cgroup memory pressure (PSI), so sandboxes keep memory.max and an OOM kill in one can restart the worker")
@@ -364,6 +374,8 @@ type workloadSession struct {
 
 // AteWorkerService is a service for shepherding single microvm.
 type AteWorkerService struct {
+	suspendRequester suspend.ActorRequester
+
 	ateworkerpb.UnimplementedWorkerServer
 
 	// Serializes lifecycle RPCs per actor.
@@ -428,8 +440,9 @@ type AteWorkerService struct {
 var _ ateworkerpb.WorkerServer = (*AteWorkerService)(nil)
 
 // NewService creates a new AteWorkerService.
-func NewService(tunnel *atunnel.Tunnel, actorLogger *actorlog.ActorLogger, maxActors int, flags *flagStore, bootID string) *AteWorkerService {
+func NewService(tunnel *atunnel.Tunnel, actorLogger *actorlog.ActorLogger, maxActors int, flags *flagStore, bootID string, requester suspend.ActorRequester) *AteWorkerService {
 	s := &AteWorkerService{
+		suspendRequester: requester,
 		locks:            actorlock.New(),
 		inFlight:         actorlock.NewInFlight(),
 		actors:           map[string]*hostedActor{},
@@ -488,6 +501,16 @@ func (s *AteWorkerService) gracefulShutdown(ctx context.Context) {
 	// leaves the containers only the remainder, and the total stays bounded by
 	// workloadGracePeriod however the time falls between them.
 	deadline := time.Now().Add(workloadGracePeriod)
+
+	drainCtx, drainCancel := context.WithDeadline(ctx, deadline)
+	defer drainCancel()
+	var actors []suspend.Actor
+	for _, hosted := range s.hostedActors() {
+		actors = append(actors, suspend.Actor{Atespace: hosted.attribution.Ref.Atespace, Name: hosted.attribution.Ref.Name, UID: hosted.attribution.UID})
+	}
+	if err := suspend.OnDrain(drainCtx, s.suspendRequester, actors); err != nil {
+		slog.WarnContext(ctx, "Checkpoint request failed during drain; stopping remaining workloads", slog.Any("err", err))
+	}
 
 	// Let checkpoints finish saving state before stopping containers.
 	waitCtx, waitCancel := context.WithDeadline(ctx, deadline)

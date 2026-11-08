@@ -276,10 +276,12 @@ func triggerActorCrash(t *testing.T, ctx context.Context, clients *e2e.Clients, 
 		t.Fatalf("GetActor failed: %v", err)
 	}
 
-	// Delete the assigned worker pod directly.
-	// The WorkerPoolSyncer will detect the pod is gone, crash the actor via syncer.go,
-	// and emit the ate_actor_crashes counter.
+	// Lose the registration before deleting the pod, so graceful drain cannot
+	// checkpoint the actor. Worker deletion emits the crash counter.
 	if ass := actor.GetStatus().GetWorkerAssignment(); ass != nil && ass.GetWorkerPod() != "" {
+		if _, err := clients.SubstrateAPI.DeleteWorker(ctx, &ateapi.DeleteWorkerRequest{Worker: ass.GetWorker()}); err != nil {
+			t.Fatal(err)
+		}
 		podName := ass.GetWorkerPod()
 		podNS := ass.GetWorkerNamespace()
 		if err := clients.K8s.CoreV1().Pods(podNS).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
