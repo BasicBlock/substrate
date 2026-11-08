@@ -34,6 +34,29 @@ type JWTProviderConfig struct {
 	Audiences                []string `json:"audiences"`
 	CertificateAuthorityFile string   `json:"certificateAuthorityFile,omitempty"`
 	DiscoveryTokenFile       string   `json:"discoveryTokenFile,omitempty"`
+	// PrincipalClaim defaults to sub. Email requires email_verified.
+	PrincipalClaim string `json:"principalClaim,omitempty"`
+}
+
+// Principal returns the principal a verified token's claims identify: the
+// value of the provider's PrincipalClaim. It fails when that claim is missing
+// or empty, or when it is "email" and the token does not say the address is
+// verified, since an unverified address names nobody.
+func (p JWTProviderConfig) Principal(claims map[string]any) (string, error) {
+	claim := p.PrincipalClaim
+	if claim == "" {
+		claim = "sub"
+	}
+	id, ok := claims[claim].(string)
+	if !ok || id == "" {
+		return "", fmt.Errorf("token has no %q claim", claim)
+	}
+	if claim == "email" {
+		if verified, ok := claims["email_verified"]; !ok || (verified != true && verified != "true") {
+			return "", fmt.Errorf("token's email is not verified")
+		}
+	}
+	return id, nil
 }
 
 // ParseAuthenticationConfig strictly parses and validates authentication configuration YAML or JSON bytes.

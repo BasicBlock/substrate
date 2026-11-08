@@ -782,3 +782,20 @@ func TestVerifyLeavesSubstrateClaimsAloneByDefault(t *testing.T) {
 		t.Errorf("Substrate claims = %+v, want none", got.SubstrateClaims)
 	}
 }
+
+func TestVerifierReturnsPrincipalClaims(t *testing.T) {
+	ti := newTestIssuer(t)
+	key := testRSAKey(t)
+	ti.addRSA("key", &key.PublicKey)
+	claims := validClaims(ti.issuer())
+	claims["email"] = "dev@example.com"
+	claims["email_verified"] = true
+	token := mintJWT(t, "RS256", "key", key, claims)
+	got, err := NewVerifier(ti.issuer(), []string{testAudience}, HTTPKeySource(ti.issuer(), ti.server.Client())).Verify(t.Context(), token, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Raw["email"] != "dev@example.com" || got.Raw["email_verified"] != true {
+		t.Fatalf("principal claims not retained: %v", got.Raw)
+	}
+}
